@@ -4,7 +4,7 @@ import pandas as pd
 import pytz
 
 from src.odds_utils import fetch_odds_api, parse_spreads
-from src.sheet_utils import get_sheet_as_df, get_master_sheet, to_native
+from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
 
 
 def capture_opening():
@@ -39,7 +39,8 @@ def capture_opening():
     col_captured_at = headers.index("opening_captured_at") + 1
     col_status = headers.index("status") + 1
 
-    updates_count = 0
+    updates = []
+    games_updated = 0
 
     for idx, row in sheet_df.iterrows():
         status = str(row.get("status", "")).strip().upper()
@@ -64,37 +65,16 @@ def capture_opening():
         odds_row = match.iloc[0]
         sheet_row_num = idx + 2
 
-        safe_home_spread = to_native(odds_row["home_spread"])
-        safe_home_odds = to_native(odds_row["home_odds"])
-        safe_captured_at = datetime.now(pytz.utc).isoformat()
+        updates.append({"row": sheet_row_num, "col": col_opening_line, "value": odds_row["home_spread"]})
+        updates.append({"row": sheet_row_num, "col": col_opening_odds, "value": odds_row["home_odds"]})
+        updates.append({"row": sheet_row_num, "col": col_captured_at, "value": datetime.now(pytz.utc).isoformat()})
+        updates.append({"row": sheet_row_num, "col": col_status, "value": "OPEN_CAPTURED"})
 
-        ws.update_cell(
-            sheet_row_num,
-            col_opening_line,
-            safe_home_spread,
-        )
+        games_updated += 1
 
-        ws.update_cell(
-            sheet_row_num,
-            col_opening_odds,
-            safe_home_odds,
-        )
+    batch_update_cells(ws, updates)
 
-        ws.update_cell(
-            sheet_row_num,
-            col_captured_at,
-            safe_captured_at,
-        )
-
-        ws.update_cell(
-            sheet_row_num,
-            col_status,
-            "OPEN_CAPTURED",
-        )
-
-        updates_count += 1
-
-    print("Captured opening lines for " + str(updates_count) + " games.")
+    print("Captured opening lines for " + str(games_updated) + " games.")
 
 
 if __name__ == "__main__":

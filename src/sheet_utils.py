@@ -1,13 +1,15 @@
-import os
-import json
 import base64
+import json
+import os
+import time
 
 import gspread
 import numpy as np
 import pandas as pd
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
-from src.config import GSHEET_CREDENTIALS, SPREADSHEET_ID, MASTER_SHEET_NAME
+from src.config import GSHEET_CREDENTIALS, MASTER_SHEET_NAME, SPREADSHEET_ID
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -76,7 +78,6 @@ def get_sheet_as_df() -> pd.DataFrame:
     data = all_values[1:]
     df = pd.DataFrame(data, columns=headers)
 
-    # Treat blank cells as missing values.
     df = df.replace("", np.nan)
 
     numeric_cols = [
@@ -101,26 +102,132 @@ def get_sheet_as_df() -> pd.DataFrame:
     return df
 
 
+def col_to_letter(col_index: int) -> str:
+    """
+    Convert 1-based column index to Excel-style column letter.
+
+    Example:
+        1 -> A
+        26 -> Z
+        27 -> AA
+    """
+    letters = ""
+    while col_index > 0:
+        col_index, remainder = divmod(col_index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def batch_update_cells(ws, updates, chunk_size=200):
+    """
+    Batch-update many cells using as few Google Sheets API requests as possible.
+
+    updates should be a list of dicts:
+        {"row": 2, "col": 5, "value": "DAL"}
+
+    row and col are 1-based.
+    """
+    if not updates:
+        return
+
+    requests = []
+
+    for update in updates:
+        row = int(update["row"])
+        col = int(update["col"])
+        value = to_native(update["value"])
+        cell_range = col_to_letter(col) + str(row)
+
+        requests.append(
+            {
+                "range": cell_range,
+                "values": [[value]],
+            }
+        )
+
+    for i in range(0, len(requests), chunk_size):
+        chunk = requests[i:i + chunk_size]
+
+        max_attempts = 5
+        delay_seconds = 10
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                ws.batch_update(chunk, value_input_option="RAW")
+                break
+            except APIError as exc:
+                error_text = str(exc)
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+
+                retryable = (
+                    status_code in {429, 500, 502, 503, 504}
+                    or "429" in error_text
+                    or "Quota exceeded" in error_text
+                    or "rate limit" in error_text.lower()
+                )
+
+                if retryable and attempt < max_attempts:
+                    sleep_for = delay_seconds * attempt
+                    print(
+                        "Google Sheets rate limit hit. "
+                        "Waiting " + str(sleep_for) + " seconds before retry "
+                        + str(attempt) + "/" + str(max_attempts - 1) + "..."
+                    )
+                    time.sleep(sleep_for)
+                    continue
+
+                raise
+            except Exception as exc:
+                error_text = str(exc)
+
+                retryable = (
+                    "429" in error_text
+                    or "Quota exceeded" in error_text
+                    or "rate limit" in error_text.lower()
+                )
+
+                if retryable and attempt < max_attempts:
+                    sleep_for = delay_seconds * attempt
+                    print(
+                        "Google Sheets transient error. "
+                        "Waiting " + str(sleep_for) + " seconds before retry "
+                        + str(attempt) + "/" + str(max_attempts - 1) + "..."
+                    )
+                    time.sleep(sleep_for)
+                    continue
+
+                raise
+
+
 def update_cell(game_id: str, column_name: str, value):
     """
-    Updates a specific cell for a given game_id.
+    Convenience helper for updating one cell by game_id.
 
-    Values are converted to plain Python types before writing.
+    Uses batch_update_cells internally so values are sanitized.
     """
     ws = get_master_sheet()
     cell = ws.find(str(game_id))
 
     if not cell:
-        print(f"Warning: Game ID {game_id} not found in sheet.")
+        print("Warning: Game ID " + str(game_id) + " not found in sheet.")
         return
 
     row_idx = cell.row
     headers = ws.row_values(1)
 
     if column_name not in headers:
-        raise ValueError(f"Column {column_name} not found in sheet headers.")
+        raise ValueError("Column " + str(column_name) + " not found in sheet headers.")
 
     col_idx = headers.index(column_name) + 1
-    safe_value = to_native(value)
 
-    ws.update_cell(row_idx, col_idx, safe_value)
+    batch_update_cells(
+        ws,
+        [
+            {
+                "row": row_idx,
+                "col": col_idx,
+                "value": value,
+            }
+        ],
+    )
