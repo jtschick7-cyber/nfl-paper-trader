@@ -1,0 +1,15 @@
+{
+  "feature_cols": [
+    "diff_pf",
+    "diff_pa",
+    "diff_margin",
+    "diff_rest",
+    "division"
+  ],
+  "seasons": [
+    2023,
+    2024,
+    2025
+  ],
+  "rows": 672
+}

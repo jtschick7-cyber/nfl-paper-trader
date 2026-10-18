@@ -1,0 +1,25 @@
+{
+  "feature_cols": [
+    "diff_pf",
+    "diff_pa",
+    "diff_margin",
+    "diff_rest",
+    "division"
+  ],
+  "sigma": 13.437304639159333,
+  "trained_on_seasons": [
+    2023,
+    2024,
+    2025
+  ],
+  "train_rows": 672,
+  "trained_for_season": 2026,
+  "coefficients": {
+    "diff_pf": 0.1940972440646006,
+    "diff_pa": -0.07146560617683168,
+    "diff_margin": 0.26556285025029763,
+    "diff_rest": 0.29158240265262986,
+    "division": -0.30500459793771456
+  },
+  "intercept": 2.480965507829958
+}
