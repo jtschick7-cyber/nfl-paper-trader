@@ -20,3 +20,4 @@ MIN_EDGE_THRESHOLD = 0.02 # 2%
 
 # Timezone
 LOCAL_TZ = "America/New_York"
+SEASON = 2026
