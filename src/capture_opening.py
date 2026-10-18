@@ -1,48 +1,101 @@
-from src.odds_utils import fetch_odds_api, parse_spreads
-from src.sheet_utils import get_sheet_as_df, get_master_sheet
 from datetime import datetime
+
+import pandas as pd
 import pytz
+
+from src.odds_utils import fetch_odds_api, parse_spreads
+from src.sheet_utils import get_sheet_as_df, get_master_sheet, to_native
+
 
 def capture_opening():
     print("Running Tuesday Opening Capture...")
+
     sheet_df = get_sheet_as_df()
     odds_data = fetch_odds_api()
     spreads = parse_spreads(odds_data)
-    
+
     if spreads.empty:
-        print("No odds data available.")
+        raw_event_count = len(odds_data) if odds_data else 0
+        print("No spreads parsed. Raw API events returned: " + str(raw_event_count))
+
+        if odds_data:
+            first_event = odds_data[0]
+            away = first_event.get("away_team", "")
+            home = first_event.get("home_team", "")
+            print("First event: " + str(away) + " @ " + str(home))
+
+            books = first_event.get("bookmakers", [])[:3]
+            for book in books:
+                market_keys = [m.get("key") for m in book.get("markets", [])]
+                print("Book: " + str(book.get("key")) + " | Markets: " + str(market_keys))
+
         return
 
     ws = get_master_sheet()
     headers = ws.row_values(1)
-    updates = []
-    
-    # Match odds to sheet rows by home/away teams and week
+
+    col_opening_line = headers.index("opening_line") + 1
+    col_opening_odds = headers.index("opening_odds") + 1
+    col_captured_at = headers.index("opening_captured_at") + 1
+    col_status = headers.index("status") + 1
+
+    updates_count = 0
+
     for idx, row in sheet_df.iterrows():
-        if row['status'] == 'PENDING' and pd.isna(row.get('opening_line')):
-            # Find matching odds
-            match = spreads[
-                (spreads['home_team'].str.lower().str.replace(' ', '') == str(row['home_team']).lower().replace(' ', '')) &
-                (spreads['away_team'].str.lower().str.replace(' ', '') == str(row['away_team']).lower().replace(' ', ''))
-            ]
-            
-            if not match.empty:
-                odds_row = match.iloc[0]
-                updates.append({
-                    'row': idx + 2, # +1 for 0-index, +1 for header
-                    'opening_line': odds_row['home_spread'] if odds_row['home_team'] == row['home_team'] else odds_row['away_spread'],
-                    'opening_odds': odds_row['home_odds'] if odds_row['home_team'] == row['home_team'] else odds_row['away_odds'],
-                    'opening_captured_at': datetime.now(pytz.utc).isoformat(),
-                    'status': 'OPEN_CAPTURED'
-                })
-                
-    for upd in updates:
-        ws.update_cell(upd['row'], headers.index('opening_line') + 1, upd['opening_line'])
-        ws.update_cell(upd['row'], headers.index('opening_odds') + 1, upd['opening_odds'])
-        ws.update_cell(upd['row'], headers.index('opening_captured_at') + 1, upd['opening_captured_at'])
-        ws.update_cell(upd['row'], headers.index('status') + 1, upd['status'])
-        
-    print(f"Captured opening lines for {len(updates)} games.")
+        status = str(row.get("status", "")).strip().upper()
+
+        if status != "PENDING":
+            continue
+
+        opening_line = row.get("opening_line")
+        if not pd.isna(opening_line):
+            continue
+
+        sheet_home = str(row.get("home_team", "")).strip().upper()
+        sheet_away = str(row.get("away_team", "")).strip().upper()
+
+        mask_home = spreads["home_team"] == sheet_home
+        mask_away = spreads["away_team"] == sheet_away
+        match = spreads[mask_home & mask_away]
+
+        if match.empty:
+            continue
+
+        odds_row = match.iloc[0]
+        sheet_row_num = idx + 2
+
+        safe_home_spread = to_native(odds_row["home_spread"])
+        safe_home_odds = to_native(odds_row["home_odds"])
+        safe_captured_at = datetime.now(pytz.utc).isoformat()
+
+        ws.update_cell(
+            sheet_row_num,
+            col_opening_line,
+            safe_home_spread,
+        )
+
+        ws.update_cell(
+            sheet_row_num,
+            col_opening_odds,
+            safe_home_odds,
+        )
+
+        ws.update_cell(
+            sheet_row_num,
+            col_captured_at,
+            safe_captured_at,
+        )
+
+        ws.update_cell(
+            sheet_row_num,
+            col_status,
+            "OPEN_CAPTURED",
+        )
+
+        updates_count += 1
+
+    print("Captured opening lines for " + str(updates_count) + " games.")
+
 
 if __name__ == "__main__":
     capture_opening()
