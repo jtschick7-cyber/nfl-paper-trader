@@ -1,3 +1,11 @@
 .venv/
 .DS_Store
 __pycache__/
+*.pyc
+data/odds_cache/*.json
+data/nflverse_cache/
+data/training.csv
+data/snapshot.csv
+.env
+data/backtest_all_predictions.csv
+data/backtest_model_threshold_picks.csv
