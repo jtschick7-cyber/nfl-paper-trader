@@ -18,4 +18,4 @@ jobs:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: python src/capture_closing.py
+        run: python -m src.capture_closing
