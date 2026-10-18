@@ -1,32 +1,55 @@
 name: Tuesday Opening Capture
+
 on:
   schedule:
-    - cron: '0 10,13,18 * * 2' # Tuesday 10:00, 13:00, 18:00 UTC
+    - cron: "0 15,18,23 * * 2"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tuesday-opening
+  cancel-in-progress: false
 
 jobs:
   capture:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SEASON: "2026"
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      - run: pip install -r requirements.txt
-      - name: Sync Schedule
-        env:
-          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          python-version: "3.10"
+
+      - name: Restore odds cache
+        uses: actions/cache@v4
+        with:
+          path: data/odds_cache
+          key: ${{ runner.os }}-odds-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-odds-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch schedule
         run: python -m src.fetch_schedule
-      - name: Capture Opening Lines
-        env:
-          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+      - name: Capture opening lines
         run: python -m src.capture_opening
-      - name: Generate Picks
-        env:
-          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+
+      - name: Generate picks
         run: python -m src.generate_picks

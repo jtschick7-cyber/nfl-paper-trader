@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 import pytz
@@ -45,11 +45,20 @@ def capture_opening():
 
     ws = get_master_sheet()
     headers = ws.row_values(1)
+    col = {h: i + 1 for i, h in enumerate(headers)}
 
-    col_opening_line = headers.index("opening_line") + 1
-    col_opening_odds = headers.index("opening_odds") + 1
-    col_captured_at = headers.index("opening_captured_at") + 1
-    col_status = headers.index("status") + 1
+    required = [
+        "opening_line",
+        "opening_odds",
+        "opening_captured_at",
+        "status",
+    ]
+
+    missing = [c for c in required if c not in col]
+
+    if missing:
+        print("Missing required columns: " + str(missing))
+        return
 
     now_utc = datetime.now(pytz.utc)
 
@@ -62,8 +71,7 @@ def capture_opening():
         if status != "PENDING":
             continue
 
-        opening_line = row.get("opening_line")
-        if not pd.isna(opening_line):
+        if not pd.isna(row.get("opening_line")):
             continue
 
         kickoff = parse_kickoff(row.get("kickoff_time"))
@@ -74,40 +82,46 @@ def capture_opening():
         if kickoff <= now_utc:
             continue
 
-        sheet_home = str(row.get("home_team", "")).strip().upper()
-        sheet_away = str(row.get("away_team", "")).strip().upper()
+        home = str(row.get("home_team", "")).strip().upper()
+        away = str(row.get("away_team", "")).strip().upper()
 
-        mask_home = spreads["home_team"] == sheet_home
-        mask_away = spreads["away_team"] == sheet_away
-        match = spreads[mask_home & mask_away]
+        mask = (spreads["home_team"] == home) & (spreads["away_team"] == away)
+        match = spreads[mask]
 
         if match.empty:
             continue
 
         odds_row = match.iloc[0]
-        sheet_row_num = idx + 2
+        row_num = idx + 2
 
         updates.append({
-            "row": sheet_row_num,
-            "col": col_opening_line,
+            "row": row_num,
+            "col": col["opening_line"],
             "value": odds_row["home_spread"],
         })
 
         updates.append({
-            "row": sheet_row_num,
-            "col": col_opening_odds,
+            "row": row_num,
+            "col": col["opening_odds"],
             "value": odds_row["home_odds"],
         })
 
+        if "opening_away_odds" in col:
+            updates.append({
+                "row": row_num,
+                "col": col["opening_away_odds"],
+                "value": odds_row["away_odds"],
+            })
+
         updates.append({
-            "row": sheet_row_num,
-            "col": col_captured_at,
+            "row": row_num,
+            "col": col["opening_captured_at"],
             "value": datetime.now(pytz.utc).isoformat(),
         })
 
         updates.append({
-            "row": sheet_row_num,
-            "col": col_status,
+            "row": row_num,
+            "col": col["status"],
             "value": "OPEN_CAPTURED",
         })
 
