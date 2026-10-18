@@ -17,4 +17,4 @@ jobs:
         env:
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-        run: python src/update_results.py
+        run: python -m src.update_results
