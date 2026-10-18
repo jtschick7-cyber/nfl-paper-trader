@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytz
@@ -7,10 +7,22 @@ from src.odds_utils import fetch_odds_api, parse_spreads
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
 
 
+def parse_kickoff(value):
+    try:
+        return pd.to_datetime(value, utc=True, errors="coerce")
+    except Exception:
+        return pd.NaT
+
+
 def capture_opening():
     print("Running Tuesday Opening Capture...")
 
     sheet_df = get_sheet_as_df()
+
+    if sheet_df.empty:
+        print("Sheet is empty.")
+        return
+
     odds_data = fetch_odds_api()
     spreads = parse_spreads(odds_data)
 
@@ -39,6 +51,8 @@ def capture_opening():
     col_captured_at = headers.index("opening_captured_at") + 1
     col_status = headers.index("status") + 1
 
+    now_utc = datetime.now(pytz.utc)
+
     updates = []
     games_updated = 0
 
@@ -50,6 +64,14 @@ def capture_opening():
 
         opening_line = row.get("opening_line")
         if not pd.isna(opening_line):
+            continue
+
+        kickoff = parse_kickoff(row.get("kickoff_time"))
+
+        if pd.isna(kickoff):
+            continue
+
+        if kickoff <= now_utc:
             continue
 
         sheet_home = str(row.get("home_team", "")).strip().upper()
@@ -65,16 +87,35 @@ def capture_opening():
         odds_row = match.iloc[0]
         sheet_row_num = idx + 2
 
-        updates.append({"row": sheet_row_num, "col": col_opening_line, "value": odds_row["home_spread"]})
-        updates.append({"row": sheet_row_num, "col": col_opening_odds, "value": odds_row["home_odds"]})
-        updates.append({"row": sheet_row_num, "col": col_captured_at, "value": datetime.now(pytz.utc).isoformat()})
-        updates.append({"row": sheet_row_num, "col": col_status, "value": "OPEN_CAPTURED"})
+        updates.append({
+            "row": sheet_row_num,
+            "col": col_opening_line,
+            "value": odds_row["home_spread"],
+        })
+
+        updates.append({
+            "row": sheet_row_num,
+            "col": col_opening_odds,
+            "value": odds_row["home_odds"],
+        })
+
+        updates.append({
+            "row": sheet_row_num,
+            "col": col_captured_at,
+            "value": datetime.now(pytz.utc).isoformat(),
+        })
+
+        updates.append({
+            "row": sheet_row_num,
+            "col": col_status,
+            "value": "OPEN_CAPTURED",
+        })
 
         games_updated += 1
 
     batch_update_cells(ws, updates)
 
-    print("Captured opening lines for " + str(games_updated) + " games.")
+    print("Captured opening lines for " + str(games_updated) + " future games.")
 
 
 if __name__ == "__main__":
