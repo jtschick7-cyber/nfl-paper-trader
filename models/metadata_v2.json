@@ -1,0 +1,70 @@
+{
+  "feature_columns": [
+    "elo_diff",
+    "diff_pf",
+    "diff_pa",
+    "diff_margin",
+    "diff_rest",
+    "division"
+  ],
+  "sigma": 13.497700241894053,
+  "calibrator_method": "logistic",
+  "calibrator_params": [
+    0.0,
+    0.09081890476294663
+  ],
+  "trained_on_seasons": [
+    1999,
+    2000,
+    2001,
+    2002,
+    2003,
+    2004,
+    2005,
+    2006,
+    2007,
+    2008,
+    2009,
+    2010,
+    2011,
+    2012,
+    2013,
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024
+  ],
+  "calibration_evidence_rows": 7788,
+  "constants": {
+    "ELO_HFA": 2.0,
+    "ELO_K": 0.05,
+    "ELO_RETENTION": 0.5,
+    "ROLL_WINDOW": 4,
+    "MIN_PERIODS": 3,
+    "RIDGE_ALPHA": 10.0,
+    "SIGMA_MIN": 10.0,
+    "SIGMA_MAX": 22.0,
+    "DEV_START": 2010,
+    "DEV_END": 2017,
+    "THRESH_START": 2018,
+    "THRESH_END": 2020,
+    "VAL_START": 2021,
+    "VAL_END": 2024
+  },
+  "ridge_coefficients": {
+    "elo_diff": 5.192453865190871,
+    "diff_pf": 0.42258528247341764,
+    "diff_pa": 0.040963445756701904,
+    "diff_margin": 0.26798374080992904,
+    "diff_rest": 0.24199400105915272,
+    "division": -0.3461049131298064
+  },
+  "ridge_intercept": 2.214811335525286
+}
