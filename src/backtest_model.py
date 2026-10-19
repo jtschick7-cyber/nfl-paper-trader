@@ -67,6 +67,18 @@ def profit_units_array(odds, stake=1.0):
 
 
 def backtest_fold(test_season, all_df, feature_cols):
+    """
+    Corrected for your nflverse diagnostic:
+
+    spread_line = away spread
+    home_line = -spread_line
+    away_line = spread_line
+
+    Home covers if:
+        home_margin + home_line > 0
+    which is:
+        home_margin - spread_line > 0
+    """
     train = (
         all_df[all_df["season"] < test_season]
         .dropna(subset=feature_cols + ["home_margin"])
@@ -82,6 +94,7 @@ def backtest_fold(test_season, all_df, feature_cols):
             subset=feature_cols
             + [
                 "home_margin",
+                "spread_line",
                 "home_spread_odds",
                 "away_spread_odds",
             ]
@@ -107,16 +120,28 @@ def backtest_fold(test_season, all_df, feature_cols):
     Xt = test[feature_cols].to_numpy(dtype=float)
     mu = model.predict(Xt)
 
-    spread = test["spread_line"].to_numpy(dtype=float)
+    actual_margin = test["home_margin"].to_numpy(dtype=float)
+    spread_line = test["spread_line"].to_numpy(dtype=float)
+
+    home_line = -spread_line
+    away_line = spread_line
+
     home_odds = test["home_spread_odds"].to_numpy(dtype=float)
     away_odds = test["away_spread_odds"].to_numpy(dtype=float)
-    actual_margin = test["home_margin"].to_numpy(dtype=float)
 
     home_teams = test["home_team"].to_numpy()
     away_teams = test["away_team"].to_numpy()
 
+    home_diff = actual_margin + home_line
+
+    home_cover = home_diff > 0
+    away_cover = home_diff < 0
+    push = np.isclose(home_diff, 0.0, atol=1e-9)
+
+    favorite_home = home_line < 0
+
     with np.errstate(divide="ignore", invalid="ignore"):
-        p_home = norm.cdf((mu + spread) / sigma)
+        p_home = norm.cdf((mu + home_line) / sigma)
 
     p_home = np.clip(p_home, 0.0, 1.0)
     p_away = 1.0 - p_home
@@ -135,14 +160,10 @@ def backtest_fold(test_season, all_df, feature_cols):
     model_p = np.where(pick_home, p_home, p_away)
     fair_p = np.where(pick_home, fair_home, fair_away)
 
-    pick_line = np.where(pick_home, spread, -spread)
+    pick_line = np.where(pick_home, home_line, away_line)
     pick_odds = np.where(pick_home, home_odds, away_odds)
     pick_side = np.where(pick_home, "HOME", "AWAY")
     pick_team = np.where(pick_home, home_teams, away_teams)
-
-    home_cover = (actual_margin + spread) > 0
-    away_cover = (actual_margin + spread) < 0
-    push = np.isclose(actual_margin + spread, 0.0, atol=1e-9)
 
     win = np.where(pick_home, home_cover, away_cover)
 
@@ -165,7 +186,10 @@ def backtest_fold(test_season, all_df, feature_cols):
             "week": test["week"].to_numpy(),
             "home_team": home_teams,
             "away_team": away_teams,
-            "spread_line": spread,
+            "spread_line_raw": spread_line,
+            "convention": "away_spread",
+            "home_line_standard": home_line,
+            "away_line_standard": away_line,
             "home_spread_odds": home_odds,
             "away_spread_odds": away_odds,
             "actual_home_margin": actual_margin,
@@ -183,20 +207,21 @@ def backtest_fold(test_season, all_df, feature_cols):
         }
     )
 
-    fav_valid = spread != 0
+    fav_valid = np.abs(spread_line) > 1e-9
 
     if not np.any(fav_valid):
         fav = out.iloc[0:0].copy()
         fav["baseline"] = "favorite"
         return out, fav
 
-    fav_home = spread < 0
-
-    fav_odds = np.where(fav_home, home_odds, away_odds)
-    fav_win = np.where(fav_home, home_cover, away_cover)
+    fav_home = favorite_home[fav_valid]
+    fav_odds = np.where(fav_home, home_odds[fav_valid], away_odds[fav_valid])
+    fav_line = np.where(fav_home, home_line[fav_valid], away_line[fav_valid])
+    fav_win = np.where(fav_home, home_cover[fav_valid], away_cover[fav_valid])
+    fav_push = push[fav_valid]
 
     fav_result = np.where(
-        push,
+        fav_push,
         "PUSH",
         np.where(fav_win, "WIN", "LOSS"),
     )
@@ -209,11 +234,22 @@ def backtest_fold(test_season, all_df, feature_cols):
 
     fav = out[fav_valid].copy()
     fav["baseline"] = "favorite"
-    fav["pick_team"] = np.where(fav_home, home_teams, away_teams)[fav_valid]
-    fav["pick_side"] = np.where(fav_home, "HOME", "AWAY")[fav_valid]
-    fav["pick_odds"] = fav_odds[fav_valid]
-    fav["pick_result"] = fav_result[fav_valid]
-    fav["roi_units"] = fav_roi[fav_valid]
+    fav["pick_team"] = np.where(fav_home, home_teams[fav_valid], away_teams[fav_valid])
+    fav["pick_side"] = np.where(fav_home, "HOME", "AWAY")
+    fav["pick_line"] = fav_line
+    fav["pick_odds"] = fav_odds
+    fav["pick_result"] = fav_result
+    fav["roi_units"] = fav_roi
+
+    for col in [
+        "model_probability",
+        "implied_probability_no_vig",
+        "edge",
+        "mu_home_margin",
+        "sigma",
+    ]:
+        if col in fav.columns:
+            fav[col] = np.nan
 
     return out, fav
 
@@ -396,10 +432,14 @@ def main():
     if all_df.empty:
         raise SystemExit("No usable backtest rows after cleaning.")
 
-    test_seasons = sorted(all_df["season"].dropna().unique())[1:]
-
+    print("Spread convention used: away_spread")
+    print("home_line = -spread_line")
+    print("away_line = spread_line")
     print("Features: " + str(feature_cols))
     print("Usable rows: " + str(len(all_df)))
+
+    test_seasons = sorted(all_df["season"].dropna().unique())[1:]
+
     print("Walk-forward test seasons: " + str([int(x) for x in test_seasons]))
 
     picks_list = []
