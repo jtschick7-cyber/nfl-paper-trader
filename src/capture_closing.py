@@ -20,9 +20,11 @@ def parse_kickoff(value):
 def row_needs_closing(row, now_utc):
     status = str(row.get("status", "")).strip().upper()
 
+    # Only process games that haven't had closing lines captured yet
     if status not in {"PENDING", "OPEN_CAPTURED", "CLOSE_CAPTURED"}:
         return False
 
+    # Skip if we already have a closing line (idempotency)
     if not pd.isna(row.get("closing_line")):
         return False
 
@@ -33,7 +35,9 @@ def row_needs_closing(row, now_utc):
 
     delta = kickoff - now_utc
 
-    return timedelta(minutes=40) <= delta <= timedelta(minutes=60)
+    # WIDENED WINDOW: 30 to 90 minutes before kickoff
+    # Previous was 40-60. This provides buffer for GH Actions latency.
+    return timedelta(minutes=30) <= delta <= timedelta(minutes=90)
 
 
 def select_dry_run_target(sheet_df, now_utc):
@@ -74,6 +78,7 @@ def capture_closing():
         return
 
     now_utc = datetime.now(pytz.utc)
+    print(f"Current UTC: {now_utc.isoformat()}")
 
     normal_targets = []
 
