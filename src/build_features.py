@@ -1,26 +1,117 @@
-# src/build_features.py
-import nfl_data_py as nfl
-import pandas as pd
-import numpy as np
-import os
+"""
+Build EPA-per-play and efficiency features from nflverse play-by-play data.
 
-def build_features(seasons):
-    print("Building features from PBP data...")
-    pbp = nfl.import_pbp(seasons)
-    
-    # Filter out non-regular season and non-offense plays
-    pbp = pbp[pbp['season_type'] == 'REG']
-    pbp = pbp[pbp['play_type'].isin(['pass', 'run'])]
-    
-    # Calculate EPA per game per team
-    game_epa = pbp.groupby(['game_id', 'posteam']).agg({
-        'epa': 'mean',
-        'success': 'mean'
-    }).reset_index()
-    
-    # Pivot to get home/away
-    # ... (simplified for brevity, in reality you merge with schedule to get home/away context)
-    # Save to data/features.csv
+Usage:
+    python -m src.build_features
+    python -m src.build_features --seasons 2023 2024 2025 2026
+"""
+
+import argparse
+import os
+import ssl
+import pandas as pd
+
+# Fix macOS Python SSL certificate verification error for urllib/nfl_data_py
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+
+from src.config import SEASON
+from src.epa_features import parse_pbp_to_game_epa
+
+OUTPUT_FILE = "data/team_game_epa.csv"
+
+
+def build_features(seasons=None):
+    if seasons is None:
+        # Default to previous 3 seasons plus current season
+        seasons = [SEASON - 3, SEASON - 2, SEASON - 1, SEASON]
+
+    seasons = sorted({int(s) for s in seasons if s >= 1999})
+    print(f"Building EPA features from PBP for seasons: {seasons}...")
+
+    try:
+        import nfl_data_py as nfl
+    except ImportError:
+        raise SystemExit(
+            "nfl_data_py is required to download play-by-play data.\n"
+            "Install it via: pip install nfl_data_py"
+        )
+
+    # Download play-by-play per season with error handling
+    pbp_dfs = []
+    for s in seasons:
+        try:
+            print(f"Downloading play-by-play for season {s}...")
+            if hasattr(nfl, "import_pbp_data"):
+                df_s = nfl.import_pbp_data([s], downcast=True)
+            elif hasattr(nfl, "import_pbp"):
+                df_s = nfl.import_pbp([s])
+            else:
+                raise AttributeError("nfl_data_py has neither import_pbp_data nor import_pbp")
+
+            if df_s is not None and not df_s.empty:
+                print(f"  Loaded {len(df_s):,} plays for {s}.")
+                pbp_dfs.append(df_s)
+        except Exception as e:
+            print(f"  Warning: Could not load PBP for season {s}: {e}")
+
+    if not pbp_dfs:
+        print("No play-by-play data could be loaded.")
+        return
+
+    pbp = pd.concat(pbp_dfs, ignore_index=True)
+
+    print(f"Processing {len(pbp):,} plays...")
+    game_epa = parse_pbp_to_game_epa(pbp)
+
+    if game_epa.empty:
+        print("Failed to parse EPA features.")
+        return
+
     os.makedirs("data", exist_ok=True)
-    game_epa.to_csv("data/features_raw.csv", index=False)
-    print("Features saved to data/features_raw.csv")
+    game_epa.to_csv(OUTPUT_FILE, index=False)
+
+    print(f"Successfully processed {len(game_epa):,} team-game records.")
+    print(f"Saved to: {OUTPUT_FILE}")
+
+    # Display preview
+    recent = game_epa[game_epa["season"] == max(seasons)]
+    if not recent.empty:
+        print("\n=== Top 5 Passing Offenses (Off Pass EPA/play) ===")
+        top_pass = (
+            recent.groupby("team")["off_pass_epa"]
+            .mean()
+            .sort_values(ascending=False)
+            .head(5)
+        )
+        for team, epa in top_pass.items():
+            print(f"  {team:4s}: {epa:+.3f} EPA/dropback")
+
+        print("\n=== Top 5 Pass Defenses (Lowest Def Pass EPA/play Allowed) ===")
+        top_def = (
+            recent.groupby("team")["def_pass_epa"]
+            .mean()
+            .sort_values(ascending=True)
+            .head(5)
+        )
+        for team, epa in top_def.items():
+            print(f"  {team:4s}: {epa:+.3f} EPA/dropback allowed")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build EPA features from nflverse PBP.")
+    parser.add_argument(
+        "--seasons",
+        nargs="+",
+        type=int,
+        default=None,
+        help="List of seasons to process (e.g. 2023 2024 2025 2026)",
+    )
+    args = parser.parse_args()
+    build_features(args.seasons)
+
+
+if __name__ == "__main__":
+    main()
