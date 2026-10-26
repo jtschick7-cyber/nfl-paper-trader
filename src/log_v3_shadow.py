@@ -404,9 +404,15 @@ def main():
 
     for r in new_rows:
         row_dict = dict(zip(HEADERS, r))
+        raw_edge = row_dict.get("v3_edge", "")
+        try:
+            edge_str = f"{round(float(raw_edge) * 100, 2):+.2f}%"
+        except (ValueError, TypeError):
+            edge_str = "N/A"
+
         print(
             f"  {row_dict['matchup']} | v3 best: {row_dict['v3_best_team']} {row_dict['v3_best_side']} "
-            f"{row_dict['v3_best_line']} @ {row_dict['v3_best_odds']} | edge: {round(float(row_dict['v3_edge'])*100, 2):+.2f}% "
+            f"{row_dict['v3_best_line']} @ {row_dict['v3_best_odds']} | edge: {edge_str} "
             f"| decision: {row_dict['v3_decision']}"
         )
 
