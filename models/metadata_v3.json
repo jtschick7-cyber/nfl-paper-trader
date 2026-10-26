@@ -1,0 +1,37 @@
+{
+  "model_version": "v3_epa_enhanced",
+  "feature_columns": [
+    "elo_diff",
+    "diff_pass_epa",
+    "diff_rush_epa",
+    "diff_success_rate",
+    "diff_early_down_epa",
+    "diff_margin",
+    "diff_rest",
+    "division"
+  ],
+  "sigma": 13.21466927662418,
+  "rmse": 13.21466927662418,
+  "r2": 0.14972415650346305,
+  "coefficients": {
+    "elo_diff": 3.8576,
+    "diff_pass_epa": 0.5598,
+    "diff_rush_epa": 0.0071,
+    "diff_success_rate": 0.794,
+    "diff_early_down_epa": 0.0,
+    "diff_margin": 1.1406,
+    "diff_rest": 0.7227,
+    "division": -0.0708
+  },
+  "intercept": 2.2071078431372553,
+  "calibrator_params": [
+    0.17370070321525555,
+    -0.3193983666588068
+  ],
+  "train_rows": 816,
+  "trained_seasons": [
+    2023,
+    2024,
+    2025
+  ]
+}
