@@ -9,6 +9,8 @@ import pytz
 from scipy.stats import norm
 
 from src.config import MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON
+from src.injury_guard import audit_candidate_pick
+from src.key_numbers import calculate_spread_probabilities
 from src.model_v2_core import (
     HISTORY_SEASONS,
     american_to_implied_prob_scalar,
@@ -297,8 +299,11 @@ def main():
 
         mu = float(ridge.predict(scaler.transform(X))[0])
 
-        p_home_raw = float(norm.cdf((mu + home_line) / sigma))
-        p_home_cal = float(calibrate_probability(calibrator, p_home_raw))
+        # Discrete key-number aware win probability (weights spikes at 3, 7, 6, 10)
+        spread_res = calculate_spread_probabilities(mu, sigma, home_line)
+        p_home_discrete = float(spread_res["cond_home_win"])
+
+        p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
         p_away_cal = 1.0 - p_home_cal
 
         fair_home, fair_away = remove_vig_scalar(
@@ -330,8 +335,20 @@ def main():
             skipped_missing_features += 1
             continue
 
+        alert = audit_candidate_pick(
+            pick_team=best_team,
+            pick_side=best_side,
+            open_line=home_line,
+            current_line=home_line,
+            mu_home_margin=mu,
+            edge=best_edge,
+            max_auto_edge=MAX_AUTO_EDGE,
+        )
+
         if best_edge >= MIN_EDGE_THRESHOLD:
-            if best_edge > MAX_AUTO_EDGE:
+            if alert.recommendation == "SUPPRESS":
+                decision = "SUPPRESS_DANGER"
+            elif alert.recommendation == "MANUAL_REVIEW":
                 decision = "MANUAL_REVIEW"
             else:
                 decision = "SHADOW_PICK"

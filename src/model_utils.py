@@ -29,6 +29,7 @@ DIVISION_MAP = {
     "LV": "AFC_W",
     "LAC": "AFC_W",
     "LAR": "NFC_W",
+    "LA": "NFC_W",
     "MIA": "AFC_E",
     "MIN": "NFC_N",
     "NE": "AFC_E",
@@ -465,7 +466,11 @@ def cover_probs(mu_home_margin, sigma, home_spread):
     if sigma <= 0:
         sigma = 1.0
 
-    z = (float(mu_home_margin) + float(home_spread)) / float(sigma)
-    p_home = float(norm.cdf(z))
-
-    return p_home, 1.0 - p_home
+    try:
+        from src.key_numbers import calculate_spread_probabilities
+        res = calculate_spread_probabilities(mu_home_margin, sigma, home_spread)
+        return float(res["cond_home_win"]), float(res["cond_away_win"])
+    except Exception:
+        z = (float(mu_home_margin) + float(home_spread)) / float(sigma)
+        p_home = float(norm.cdf(z))
+        return p_home, 1.0 - p_home

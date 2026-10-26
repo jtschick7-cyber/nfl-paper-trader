@@ -13,6 +13,8 @@ from src.config import (
     MIN_EDGE_THRESHOLD,
     SEASON,
 )
+from src.injury_guard import audit_candidate_pick
+from src.key_numbers import is_integer_spread
 from src.model_utils import DIVISION_MAP, compute_snapshot, cover_probs
 from src.odds_utils import american_to_implied_prob, remove_vig
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
@@ -210,7 +212,22 @@ def main():
             "sigma": sigma,
         }
 
-        if edge > MAX_AUTO_EDGE:
+        alert = audit_candidate_pick(
+            pick_team=pick_team,
+            pick_side=side,
+            open_line=home_spread,
+            current_line=home_spread,
+            mu_home_margin=mu,
+            edge=edge,
+            max_auto_edge=MAX_AUTO_EDGE,
+        )
+
+        pick_record["integrity_alert"] = alert
+
+        if alert.recommendation == "SUPPRESS":
+            print("  SUPPRESSED pick: " + away + " @ " + home + " | " + "; ".join(alert.flags))
+            continue
+        elif alert.recommendation == "MANUAL_REVIEW":
             manual_review.append(pick_record)
         else:
             scored.append(pick_record)

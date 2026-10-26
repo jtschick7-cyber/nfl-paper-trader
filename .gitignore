@@ -9,3 +9,5 @@ data/snapshot.csv
 .env
 data/backtest_all_predictions.csv
 data/backtest_model_threshold_picks.csv
+chat-export*.json
+*.jsonl
