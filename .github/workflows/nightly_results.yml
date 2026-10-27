@@ -38,3 +38,6 @@ jobs:
 
       - name: Update results
         run: python -m src.update_results
+
+      - name: Compare models and update scorecard
+        run: python -m src.compare_models

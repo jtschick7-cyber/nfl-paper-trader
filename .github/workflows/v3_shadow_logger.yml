@@ -39,3 +39,6 @@ jobs:
 
       - name: Log v3 EPA shadow evaluations
         run: python -m src.log_v3_shadow
+
+      - name: Compare models and update scorecard
+        run: python -m src.compare_models
