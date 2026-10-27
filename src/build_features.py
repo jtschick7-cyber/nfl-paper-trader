@@ -19,8 +19,10 @@ except AttributeError:
 
 from src.config import SEASON
 from src.epa_features import parse_pbp_to_game_epa
+from src.qb_features import attribute_dropbacks, compute_game_qb_stats
 
 OUTPUT_FILE = "data/team_game_epa.csv"
+QB_OUTPUT_FILE = "data/team_game_qb.csv"
 
 
 def build_features(seasons=None):
@@ -76,6 +78,16 @@ def build_features(seasons=None):
     print(f"Successfully processed {len(game_epa):,} team-game records.")
     print(f"Saved to: {OUTPUT_FILE}")
 
+    # Extract Quarterback dropback efficiency
+    print("\nExtracting Quarterback dropback efficiency...")
+    attributed = attribute_dropbacks(pbp)
+    game_qb = compute_game_qb_stats(attributed)
+
+    if not game_qb.empty:
+        game_qb.to_csv(QB_OUTPUT_FILE, index=False)
+        print(f"Successfully processed {len(game_qb):,} QB-game records.")
+        print(f"Saved to: {QB_OUTPUT_FILE}")
+
     # Display preview
     recent = game_epa[game_epa["season"] == max(seasons)]
     if not recent.empty:
@@ -98,6 +110,22 @@ def build_features(seasons=None):
         )
         for team, epa in top_def.items():
             print(f"  {team:4s}: {epa:+.3f} EPA/dropback allowed")
+
+    if not game_qb.empty:
+        recent_qb = game_qb[game_qb["season"] == max(seasons)]
+        if not recent_qb.empty:
+            qb_agg = recent_qb.groupby("qb_name").agg(
+                dropbacks=("dropbacks", "sum"),
+                total_epa=("total_epa", "sum"),
+                success_rate=("success_rate", "mean"),
+            )
+            qb_agg["epa_per_db"] = qb_agg["total_epa"] / np.maximum(qb_agg["dropbacks"], 1)
+            qualified = qb_agg[qb_agg["dropbacks"] >= 50].sort_values("epa_per_db", ascending=False).head(5)
+
+            if not qualified.empty:
+                print("\n=== Top 5 Starting Quarterbacks (EPA/dropback, min 50 db) ===")
+                for qb, row in qualified.iterrows():
+                    print(f"  {qb:18s}: {row['epa_per_db']:+.3f} EPA/db ({int(row['dropbacks'])} dropbacks, {row['success_rate']*100:.1f}% success)")
 
 
 def main():
