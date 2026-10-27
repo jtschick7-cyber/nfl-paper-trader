@@ -135,7 +135,9 @@ def main():
         raise SystemExit(f"Missing v3 model artifact: {MODEL_PATH}\nRun: python -m src.train_model_v3")
 
     if not os.path.exists(EPA_DATA_PATH):
-        raise SystemExit(f"Missing EPA data: {EPA_DATA_PATH}\nRun: python -m src.build_features")
+        print(f"EPA data missing at {EPA_DATA_PATH}. Building on the fly...")
+        from src.build_features import build_features
+        build_features()
 
     artifact = joblib.load(MODEL_PATH)
     feature_columns = artifact["feature_columns"]

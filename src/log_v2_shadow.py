@@ -302,6 +302,7 @@ def main():
         # Discrete key-number aware win probability (weights spikes at 3, 7, 6, 10)
         spread_res = calculate_spread_probabilities(mu, sigma, home_line)
         p_home_discrete = float(spread_res["cond_home_win"])
+        p_home_raw = p_home_discrete
 
         p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
         p_away_cal = 1.0 - p_home_cal
