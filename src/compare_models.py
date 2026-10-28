@@ -28,6 +28,7 @@ except ImportError:
     nfl = None
 
 from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, SEASON
+from src.staking import compute_push_aware_stake
 from src.v2_sheet_utils import get_or_create_worksheet
 
 SCORECARD_TAB = "Model_Scorecard"
@@ -364,7 +365,12 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
         v3_edge = safe_float(r3.get("v3_edge"), 0.0)
 
         if v3_dec == "SHADOW_PICK":
-            v3_pick_str = f"{v3_team} {v3_line:+.1f} (+{v3_edge*100:.1f}%)"
+            v3_odds = safe_float(r3.get("v3_best_odds"), -110.0)
+            v3_prob = safe_float(r3.get("v3_model_probability"), 0.52)
+            p_push = safe_float(r3.get("p_push"), 0.05)
+            stake_info = compute_push_aware_stake(v3_prob, p_push, v3_odds)
+            stake_units = stake_info["recommended_units"]
+            v3_pick_str = f"{v3_team} {v3_line:+.1f} (+{v3_edge*100:.1f}%) [{stake_units:.1f}u]"
             if v3_edge >= 0.035:
                 v3_pick_str += " ★"
         elif v3_dec == "SUPPRESS_DANGER":

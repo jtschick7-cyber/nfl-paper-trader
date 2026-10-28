@@ -20,9 +20,11 @@ except AttributeError:
 from src.config import SEASON
 from src.epa_features import parse_pbp_to_game_epa
 from src.qb_features import attribute_dropbacks, compute_game_qb_stats
+from src.turnover_luck import parse_pbp_turnovers
 
 OUTPUT_FILE = "data/team_game_epa.csv"
 QB_OUTPUT_FILE = "data/team_game_qb.csv"
+TURNOVER_OUTPUT_FILE = "data/team_game_turnovers.csv"
 
 
 def build_features(seasons=None):
@@ -87,6 +89,14 @@ def build_features(seasons=None):
         game_qb.to_csv(QB_OUTPUT_FILE, index=False)
         print(f"Successfully processed {len(game_qb):,} QB-game records.")
         print(f"Saved to: {QB_OUTPUT_FILE}")
+
+    # Extract Turnover Luck metrics
+    print("\nExtracting Turnover Luck metrics...")
+    game_turnovers = parse_pbp_turnovers(pbp)
+    if not game_turnovers.empty:
+        game_turnovers.to_csv(TURNOVER_OUTPUT_FILE, index=False)
+        print(f"Successfully processed {len(game_turnovers):,} turnover-game records.")
+        print(f"Saved to: {TURNOVER_OUTPUT_FILE}")
 
     # Display preview
     recent = game_epa[game_epa["season"] == max(seasons)]
