@@ -25,6 +25,7 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.optimize import lsq_linear
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler
 
@@ -32,6 +33,7 @@ from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
+from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
 
 MODEL_PATH = "models/nfl_spread_model_v3.pkl"
 META_PATH = "models/metadata_v3.json"
@@ -47,6 +49,29 @@ V3_FEATURES = [
     "diff_rest",
     "division",
 ]
+
+
+# Bounds for V3_FEATURES:
+# Efficiency, margin, elo, rest must be >= 0 (cannot hurt margin)
+# Division is unconstrained
+V3_BOUNDS_LB = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -np.inf])
+V3_BOUNDS_UB = np.array([np.inf, np.inf, np.inf, np.inf, np.inf, np.inf, np.inf, np.inf])
+
+
+def fit_constrained_ridge(X_scaled, y, alpha=15.0, bounds=(V3_BOUNDS_LB, V3_BOUNDS_UB)):
+    """
+    Fits Ridge regression with box constraints on coefficients using augmented least squares.
+    """
+    n_samples, n_features = X_scaled.shape
+    y_mean = float(np.mean(y))
+    y_centered = y - y_mean
+
+    X_aug = np.vstack([X_scaled, np.sqrt(alpha) * np.eye(n_features)])
+    y_aug = np.concatenate([y_centered, np.zeros(n_features)])
+
+    lb, ub = bounds
+    res = lsq_linear(X_aug, y_aug, bounds=(lb, ub), lsmr_tol="auto")
+    return ConstrainedRidgeModel(res.x, y_mean)
 
 # Elo Hyperparameters
 ELO_INITIAL = 1500.0
@@ -67,9 +92,10 @@ def update_elo(home_elo, away_elo, actual_margin):
     else:
         actual_home = 0.5
 
-    # Margin of victory multiplier
+    # Margin of victory multiplier using FiveThirtyEight winner/loser MOV denominator
     mov = abs(actual_margin)
-    mov_mult = math.log(max(mov, 1) + 1.0) * (2.2 / ((home_elo - away_elo) * 0.001 + 2.2))
+    elo_diff_winner = (h_adj - away_elo) if actual_margin >= 0 else (away_elo - h_adj)
+    mov_mult = math.log(max(mov, 1) + 1.0) * (2.2 / (elo_diff_winner * 0.001 + 2.2))
     shift = ELO_K * mov_mult * (actual_home - exp_home)
 
     return home_elo + shift, away_elo - shift
@@ -79,9 +105,9 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
     """
     Builds a leak-free point-in-time training dataset combining Elo,
     rolling play-by-play EPA features, and schedule context.
+    Warms up Elo and rolling metrics starting from 2020.
     """
-    sched = sched_df[sched_df["season"].isin(seasons)].copy()
-    sched = sched.dropna(subset=["home_score", "away_score", "kickoff_utc"])
+    sched = sched_df.dropna(subset=["home_score", "away_score", "kickoff_utc"]).copy()
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True)
     sched = sched.sort_values("kickoff_utc").reset_index(drop=True)
 
@@ -113,11 +139,12 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
         a_elo = elo_ratings.get(away, ELO_INITIAL)
         elo_diff = (h_elo + ELO_HFA) - a_elo
 
-        # Rest days calculation
+        # Rest days calculation (Eastern calendar days)
+        local_day = kickoff.tz_convert("America/New_York").normalize()
         h_last = team_last_date.get(home)
         a_last = team_last_date.get(away)
-        h_rest = min((kickoff - h_last).days, 21) if h_last else 7
-        a_rest = min((kickoff - a_last).days, 21) if a_last else 7
+        h_rest = min((local_day - h_last).days, 21) if h_last else 7
+        a_rest = min((local_day - a_last).days, 21) if a_last else 7
         diff_rest = float(h_rest - a_rest)
 
         # Rolling margin calculation (last 4 games)
@@ -133,47 +160,48 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
         division = 1.0 if h_div and a_div and h_div == a_div else 0.0
 
         # Point-in-time EPA features
-        epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
-        epa_matchup = get_matchup_epa_features(epa_snap, home, away)
+        if season in seasons:
+            epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
+            epa_matchup = get_matchup_epa_features(epa_snap, home, away)
 
-        if epa_matchup is not None:
-            diff_pass_epa = epa_matchup["diff_pass_epa"]
-            diff_rush_epa = epa_matchup["diff_rush_epa"]
-            diff_success = epa_matchup["diff_success_rate"]
-            diff_early = epa_matchup.get("diff_early_down_epa", 0.0)
-        else:
-            diff_pass_epa = 0.0
-            diff_rush_epa = 0.0
-            diff_success = 0.0
-            diff_early = 0.0
+            if epa_matchup is not None:
+                diff_pass_epa = epa_matchup["diff_pass_epa"]
+                diff_rush_epa = epa_matchup["diff_rush_epa"]
+                diff_success = epa_matchup["diff_success_rate"]
+                diff_early = epa_matchup.get("diff_early_down_epa", 0.0)
+            else:
+                diff_pass_epa = 0.0
+                diff_rush_epa = 0.0
+                diff_success = 0.0
+                diff_early = 0.0
 
-        # Record feature row
-        rows.append({
-            "game_id": game["game_id"],
-            "season": season,
-            "week": game["week"],
-            "kickoff_utc": kickoff,
-            "home_team": home,
-            "away_team": away,
-            "home_line": -spread_line,  # Standard convention: negative = favorite
-            "actual_home_margin": actual_margin,
-            "elo_diff": elo_diff / 25.0,  # Scaled to points of spread
-            "diff_pass_epa": diff_pass_epa,
-            "diff_rush_epa": diff_rush_epa,
-            "diff_success_rate": diff_success,
-            "diff_early_down_epa": diff_early,
-            "diff_margin": diff_margin,
-            "diff_rest": diff_rest,
-            "division": division,
-        })
+            # Record feature row
+            rows.append({
+                "game_id": game["game_id"],
+                "season": season,
+                "week": game["week"],
+                "kickoff_utc": kickoff,
+                "home_team": home,
+                "away_team": away,
+                "home_line": -spread_line,  # Standard convention: negative = favorite
+                "actual_home_margin": actual_margin,
+                "elo_diff": elo_diff / 25.0,  # Scaled to points of spread
+                "diff_pass_epa": diff_pass_epa,
+                "diff_rush_epa": diff_rush_epa,
+                "diff_success_rate": diff_success,
+                "diff_early_down_epa": diff_early,
+                "diff_margin": diff_margin,
+                "diff_rest": diff_rest,
+                "division": division,
+            })
 
         # Update post-game state (leak-free)
         new_h_elo, new_a_elo = update_elo(h_elo, a_elo, actual_margin)
         elo_ratings[home] = new_h_elo
         elo_ratings[away] = new_a_elo
 
-        team_last_date[home] = kickoff
-        team_last_date[away] = kickoff
+        team_last_date[home] = local_day
+        team_last_date[away] = local_day
 
         team_margins.setdefault(home, []).append(actual_margin)
         team_margins.setdefault(away, []).append(-actual_margin)
@@ -191,7 +219,7 @@ def train_v3_model(train_seasons=None):
         raise SystemExit(f"EPA data missing. Run: python -m src.build_features")
 
     epa_df = pd.read_csv(EPA_DATA_PATH)
-    sched_df = _load_sched(train_seasons)
+    sched_df = _load_sched(list(range(2020, max(train_seasons) + 1)))
 
     print(f"Building v3 training dataset for seasons {train_seasons}...")
     dataset = build_v3_training_dataset(train_seasons, epa_df, sched_df)
@@ -203,7 +231,7 @@ def train_v3_model(train_seasons=None):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Ridge Regression for Margin Prediction
+    # L2 Ridge Regression for Margin Prediction
     ridge = Ridge(alpha=15.0)
     ridge.fit(X_scaled, y)
 
@@ -225,31 +253,61 @@ def train_v3_model(train_seasons=None):
         print(f"  {feat:20s}: {coef:+.3f} pts")
     print(f"  {'intercept':20s}: {ridge.intercept_:+.3f} pts")
 
-    # Fit Logistic Platt Calibrator
-    # Convert predicted margin to discrete cover probability, then calibrate to binary cover
-    probs_raw = []
-    covers_actual = []
+    # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator
+    # Uses chronological TimeSeriesSplit with symmetric HOME/AWAY rows (weight=0.5)
+    # and monotonicity guard coef > 0
+    from sklearn.model_selection import TimeSeriesSplit
+    tscv = TimeSeriesSplit(n_splits=5)
 
-    for idx, row in dataset.iterrows():
-        mu_pred = y_pred[idx]
-        home_line = row["home_line"]
-        actual_margin = row["actual_home_margin"]
+    evidence_rows = []
+    for train_idx, val_idx in tscv.split(dataset):
+        X_tr, y_tr = X[train_idx], y[train_idx]
+        X_val = X[val_idx]
+        val_df = dataset.iloc[val_idx]
 
-        # Only calibrate on non-push games
-        if abs(actual_margin + home_line) < 1e-5:
-            continue
+        scaler_f = StandardScaler().fit(X_tr)
+        ridge_f = Ridge(alpha=15.0).fit(scaler_f.transform(X_tr), y_tr)
 
-        p_res = calculate_spread_probabilities(mu_pred, sigma, home_line)
-        probs_raw.append(p_res["cond_home_win"])
-        covers_actual.append(1 if (actual_margin + home_line) > 0 else 0)
+        resid = y_tr - ridge_f.predict(scaler_f.transform(X_tr))
+        sigma_f = float(np.std(resid)) if len(resid) > 1 else 13.4
 
-    log_reg = LogisticRegression()
-    X_cal = np.array(probs_raw).reshape(-1, 1)
-    y_cal = np.array(covers_actual)
-    log_reg.fit(X_cal, y_cal)
+        mu_val = ridge_f.predict(scaler_f.transform(X_val))
 
-    calibrator_params = [float(log_reg.intercept_[0]), float(log_reg.coef_[0][0])]
-    print(f"\nLogistic Calibrator: intercept={calibrator_params[0]:.3f}, slope={calibrator_params[1]:.3f}")
+        for j, (_, row) in enumerate(val_df.iterrows()):
+            home_line = float(row["home_line"])
+            act_margin = float(row["actual_home_margin"])
+            diff = act_margin + home_line
+            push = abs(diff) < 1e-5
+            home_win = diff > 0
+            away_win = diff < 0
+
+            sp = calculate_spread_probabilities(mu_val[j], sigma_f, home_line)
+            p_h = float(sp["cond_home_win"])
+            p_a = 1.0 - p_h
+
+            evidence_rows.append({
+                "season": int(row["season"]),
+                "game_id": row["game_id"],
+                "side": "HOME",
+                "p_raw": p_h,
+                "actual_win": bool(home_win),
+                "push": bool(push),
+                "weight": 0.5,
+            })
+            evidence_rows.append({
+                "season": int(row["season"]),
+                "game_id": row["game_id"],
+                "side": "AWAY",
+                "p_raw": p_a,
+                "actual_win": bool(away_win),
+                "push": bool(push),
+                "weight": 0.5,
+            })
+
+    evidence_df = pd.DataFrame(evidence_rows)
+    calibrator = fit_calibrator(evidence_df)
+    calibrator_method, calibrator_params = calibrator
+    print(f"\nCalibrator: method={calibrator_method}, params={calibrator_params}")
 
     # Save artifact
     os.makedirs("models", exist_ok=True)
@@ -259,7 +317,8 @@ def train_v3_model(train_seasons=None):
         "scaler": scaler,
         "ridge": ridge,
         "sigma": sigma,
-        "calibrator": log_reg,
+        "calibrator": calibrator,
+        "calibrator_method": calibrator_method,
         "calibrator_params": calibrator_params,
         "trained_seasons": train_seasons,
     }
@@ -273,6 +332,7 @@ def train_v3_model(train_seasons=None):
         "r2": r2,
         "coefficients": coef_dict,
         "intercept": float(ridge.intercept_),
+        "calibrator_method": calibrator_method,
         "calibrator_params": calibrator_params,
         "train_rows": len(dataset),
         "trained_seasons": train_seasons,

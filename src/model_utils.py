@@ -1,4 +1,5 @@
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -192,8 +193,64 @@ def _normalize_schedule(raw):
 
 
 def _load_sched(seasons):
-    import nfl_data_py as nfl
-    raw = nfl.import_schedules(seasons)
+    seasons = sorted(list({int(s) for s in seasons}))
+    cache_path = os.path.join("data", "nflverse_cache", "games.csv")
+    scheds = None
+
+    if os.path.exists(cache_path):
+        try:
+            scheds = pd.read_csv(cache_path, low_memory=False)
+        except Exception:
+            scheds = None
+
+    missing_seasons = set(seasons)
+    is_current_stale = False
+    now_ts = time.time()
+
+    if scheds is not None and not scheds.empty and "season" in scheds.columns:
+        present_seasons = set(scheds["season"].dropna().astype(int).unique())
+        missing_seasons = set(seasons) - present_seasons
+
+        if SEASON in seasons:
+            try:
+                mtime = os.path.getmtime(cache_path)
+                if (now_ts - mtime) > 6 * 3600:
+                    is_current_stale = True
+            except Exception:
+                pass
+
+    seasons_to_fetch = sorted(list(missing_seasons))
+    if is_current_stale and SEASON not in seasons_to_fetch:
+        seasons_to_fetch.append(SEASON)
+
+    if seasons_to_fetch:
+        try:
+            import nfl_data_py as nfl
+            new_raw = nfl.import_schedules(seasons_to_fetch)
+            if new_raw is not None and not new_raw.empty:
+                if scheds is not None and not scheds.empty:
+                    gid_col = "game_id" if "game_id" in new_raw.columns and "game_id" in scheds.columns else None
+                    if gid_col:
+                        combined = pd.concat([scheds, new_raw], ignore_index=True)
+                        scheds = combined.drop_duplicates(subset=[gid_col], keep="last").reset_index(drop=True)
+                    else:
+                        scheds = pd.concat([scheds, new_raw], ignore_index=True).drop_duplicates().reset_index(drop=True)
+                else:
+                    scheds = new_raw.reset_index(drop=True)
+
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    scheds.to_csv(cache_path, index=False)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"Warning: Failed to fetch schedules for {seasons_to_fetch}: {exc}")
+
+    if scheds is not None and not scheds.empty and "season" in scheds.columns:
+        raw = scheds[scheds["season"].astype(int).isin(seasons)].copy()
+    else:
+        raw = pd.DataFrame()
+
     return _normalize_schedule(raw)
 
 
@@ -241,8 +298,11 @@ def _team_panel(sched):
     panel = panel.dropna(subset=["team", "opponent", "pts_for", "pts_against", "kickoff_utc"])
     panel = panel.sort_values(["team", "season", "kickoff_utc"]).reset_index(drop=True)
 
-    panel["prev_date"] = panel.groupby(["team", "season"])["kickoff_utc"].shift(1)
-    panel["rest_days"] = (panel["kickoff_utc"] - panel["prev_date"]).dt.days
+    local_day = panel["kickoff_utc"].dt.tz_convert("America/New_York").dt.normalize()
+    prev_kickoff = panel.groupby(["team", "season"])["kickoff_utc"].shift(1)
+    prev_local_day = prev_kickoff.dt.tz_convert("America/New_York").dt.normalize()
+    panel["prev_date"] = prev_kickoff
+    panel["rest_days"] = (local_day - prev_local_day).dt.days
 
     if "div_game" in panel.columns:
         panel["division"] = panel["div_game"].apply(_to_bool_int)

@@ -16,6 +16,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+_cached_client = None
+_cached_spreadsheet = None
+_worksheet_cache = {}
+
 
 def to_native(value):
     """
@@ -45,31 +49,120 @@ def to_native(value):
 
 
 def get_gspread_client():
-    """Authenticates using Base64 decoded credentials from GitHub Secrets."""
-    if not GSHEET_CREDENTIALS:
+    """Authenticates using Base64 decoded credentials with singleton caching."""
+    global _cached_client
+    if _cached_client is not None:
+        return _cached_client
+
+    raw_creds = GSHEET_CREDENTIALS or os.getenv("GSHEET_CREDENTIALS")
+    if not raw_creds:
         raise ValueError("GSHEET_CREDENTIALS environment variable is missing.")
 
-    creds_json = base64.b64decode(GSHEET_CREDENTIALS).decode("utf-8")
-    creds_dict = json.loads(creds_json)
+    try:
+        creds_json = base64.b64decode(raw_creds).decode("utf-8")
+        creds_dict = json.loads(creds_json)
+    except Exception as exc:
+        raise ValueError(f"Failed to decode GSHEET_CREDENTIALS: {exc}")
+
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
+    _cached_client = gspread.authorize(creds)
+    return _cached_client
+
+
+def get_spreadsheet():
+    """Returns opened Spreadsheet instance with singleton caching."""
+    global _cached_spreadsheet
+    if _cached_spreadsheet is not None:
+        return _cached_spreadsheet
+
+    sheet_id = SPREADSHEET_ID or os.getenv("SPREADSHEET_ID")
+    if not sheet_id:
+        raise ValueError("SPREADSHEET_ID environment variable is missing.")
+
+    client = get_gspread_client()
+    _cached_spreadsheet = client.open_by_key(sheet_id)
+    return _cached_spreadsheet
+
+
+def get_or_create_worksheet(title: str, rows: str = "5000", cols: str = "50"):
+    """
+    Returns worksheet with given title, creating it if it doesn't exist.
+    Features connection pooling and rate-limit backoff retry.
+    """
+    if title in _worksheet_cache:
+        return _worksheet_cache[title]
+
+    sh = get_spreadsheet()
+    max_attempts = 5
+    delay_seconds = 5
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            try:
+                ws = sh.worksheet(title)
+            except gspread.exceptions.WorksheetNotFound:
+                ws = sh.add_worksheet(title=title, rows=rows, cols=cols)
+            _worksheet_cache[title] = ws
+            return ws
+        except Exception as exc:
+            if attempt < max_attempts and ("429" in str(exc) or "Quota" in str(exc)):
+                time.sleep(delay_seconds * attempt)
+                continue
+            raise
+
+
+def retry_api_call(fn, *args, max_attempts=5, delay_seconds=5, **kwargs):
+    """
+    Executes a gspread function with automatic retries on 429/5xx and quota errors.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as exc:
+            error_text = str(exc)
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+
+            retryable = (
+                status_code in {429, 500, 502, 503, 504}
+                or "429" in error_text
+                or "Quota exceeded" in error_text
+                or "rate limit" in error_text.lower()
+            )
+
+            if retryable and attempt < max_attempts:
+                sleep_for = delay_seconds * attempt
+                time.sleep(sleep_for)
+                continue
+            raise
+        except Exception as exc:
+            error_text = str(exc)
+            retryable = (
+                "429" in error_text
+                or "Quota exceeded" in error_text
+                or "rate limit" in error_text.lower()
+            )
+            if retryable and attempt < max_attempts:
+                sleep_for = delay_seconds * attempt
+                time.sleep(sleep_for)
+                continue
+            raise
 
 
 def get_master_sheet():
     """Returns the master worksheet object."""
-    client = get_gspread_client()
-    sh = client.open_by_key(SPREADSHEET_ID)
-    return sh.worksheet(MASTER_SHEET_NAME)
+    return get_or_create_worksheet(MASTER_SHEET_NAME)
 
 
-def get_sheet_as_df() -> pd.DataFrame:
+def get_sheet_as_df(ws=None) -> pd.DataFrame:
     """
-    Downloads the master sheet into a Pandas DataFrame.
+    Downloads the sheet (master sheet if ws is None) into a Pandas DataFrame.
 
     Safe when the sheet has only a header row and no data rows.
     """
-    ws = get_master_sheet()
-    all_values = ws.get_all_values()
+    if ws is None:
+        ws = get_master_sheet()
+    all_values = retry_api_call(ws.get_all_values)
 
     if not all_values:
         return pd.DataFrame()

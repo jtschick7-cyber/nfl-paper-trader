@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timedelta
 
@@ -6,8 +7,29 @@ import pytz
 
 from src.odds_utils import fetch_odds_api, parse_spreads
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
+from src.injury_guard import check_line_movement
 
 DRY_RUN_CLOSE = os.getenv("DRY_RUN_CLOSE", "").strip().lower() in {"1", "true", "yes", "y"}
+ATTEMPTS_FILE = os.path.join("data", "odds_cache", "closing_attempts.json")
+
+
+def load_closing_attempts():
+    if os.path.exists(ATTEMPTS_FILE):
+        try:
+            with open(ATTEMPTS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_closing_attempts(attempts):
+    try:
+        os.makedirs(os.path.dirname(ATTEMPTS_FILE), exist_ok=True)
+        with open(ATTEMPTS_FILE, "w") as f:
+            json.dump(attempts, f, indent=2)
+    except Exception:
+        pass
 
 
 def parse_kickoff(value):
@@ -17,7 +39,11 @@ def parse_kickoff(value):
         return pd.NaT
 
 
-def row_needs_closing(row, now_utc):
+def row_needs_closing(row, now_utc, attempts=None):
+    gid = str(row.get("game_id", "")).strip()
+    if attempts and attempts.get(gid, 0) >= 2:
+        return False
+
     status = str(row.get("status", "")).strip().upper()
 
     # Only process games that haven't had closing lines captured yet
@@ -80,10 +106,11 @@ def capture_closing():
     now_utc = datetime.now(pytz.utc)
     print(f"Current UTC: {now_utc.isoformat()}")
 
+    attempts = load_closing_attempts()
     normal_targets = []
 
     for idx, row in sheet_df.iterrows():
-        if row_needs_closing(row, now_utc):
+        if row_needs_closing(row, now_utc, attempts=attempts):
             normal_targets.append((idx, row))
 
     dry_targets = []
@@ -103,7 +130,7 @@ def capture_closing():
 
     force_refresh = DRY_RUN_CLOSE and not normal_targets
 
-    odds_data = fetch_odds_api(max_age_seconds=300, force_refresh=force_refresh)
+    odds_data = fetch_odds_api(max_age_seconds=900, force_refresh=force_refresh)
     spreads = parse_spreads(odds_data)
 
     if spreads.empty:
@@ -164,6 +191,7 @@ def capture_closing():
     games_updated = 0
 
     for idx, row in normal_targets:
+        gid = str(row.get("game_id", "")).strip()
         home = str(row.get("home_team", "")).strip().upper()
         away = str(row.get("away_team", "")).strip().upper()
 
@@ -171,7 +199,12 @@ def capture_closing():
         match = spreads[mask]
 
         if match.empty:
+            attempts[gid] = attempts.get(gid, 0) + 1
+            print(f"Unmatched game {away} @ {home} (attempt {attempts[gid]}/2).")
             continue
+
+        if gid in attempts:
+            del attempts[gid]
 
         odds_row = match.iloc[0]
         row_num = idx + 2
@@ -195,6 +228,26 @@ def capture_closing():
                 "value": odds_row["away_odds"],
             })
 
+        # Active RLM check if pick was made on this game
+        pick_side = str(row.get("pick_side", "")).strip().upper()
+        if pick_side in {"HOME", "AWAY"}:
+            rlm = check_line_movement(
+                open_line=row.get("opening_line"),
+                current_line=odds_row["home_spread"],
+                pick_side=pick_side,
+            )
+            if rlm:
+                print(f"RLM ALERT: {row.get('game_id')} {rlm['message']}")
+                if "notes" in col:
+                    curr_notes = str(row.get("notes", "")).strip()
+                    note_str = f"RLM_ALERT: moved {rlm['pts_against']:.1f}pts against {pick_side}"
+                    combined = f"{curr_notes}; {note_str}" if curr_notes and curr_notes != "nan" else note_str
+                    updates.append({
+                        "row": row_num,
+                        "col": col["notes"],
+                        "value": combined,
+                    })
+
         updates.append({
             "row": row_num,
             "col": col["closing_captured_at"],
@@ -209,6 +262,7 @@ def capture_closing():
 
         games_updated += 1
 
+    save_closing_attempts(attempts)
     batch_update_cells(ws, updates)
 
     print("Captured closing lines for " + str(games_updated) + " games.")

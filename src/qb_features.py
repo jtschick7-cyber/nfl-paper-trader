@@ -29,7 +29,7 @@ from src.config import SEASON
 
 # Minimum dropback threshold before shrinkage
 MIN_DROPBACK_THRESHOLD = 20
-SHRINKAGE_K = 4.0
+SHRINKAGE_K = 60.0
 
 # League-average baseline EPA per dropback (~0.05 EPA/play across recent NFL seasons)
 DEFAULT_LEAGUE_QB_PRIOR = 0.05
@@ -117,6 +117,9 @@ def compute_game_qb_stats(dropbacks_df: pd.DataFrame) -> pd.DataFrame:
         dropbacks=("epa", "count"),
         total_epa=("epa", "sum"),
         epa_per_dropback=("epa", "mean"),
+        success_count=("success", "sum"),
+        sack_count=("sack", "sum"),
+        int_count=("interception", "sum"),
         success_rate=("success", "mean"),
         sack_rate=("sack", "mean"),
         int_rate=("interception", "mean"),
@@ -198,21 +201,24 @@ def compute_rolling_qb_ratings(qb_game_df: pd.DataFrame, window: int = 4, min_dr
                 })
                 continue
 
-            # Identify dominant QB by total dropbacks in window
+            # Identify dominant QB by total dropbacks in window with dropback-weighted rates
             qb_totals = prior_qb_rows.groupby("qb_name").agg(
                 dropbacks=("dropbacks", "sum"),
                 total_epa=("total_epa", "sum"),
-                avg_success=("success_rate", "mean"),
-                avg_sack=("sack_rate", "mean"),
-                avg_int=("int_rate", "mean"),
+                success_count=("success_count", "sum") if "success_count" in prior_qb_rows.columns else ("success_rate", lambda s: (s * prior_qb_rows.loc[s.index, "dropbacks"]).sum()),
+                sack_count=("sack_count", "sum") if "sack_count" in prior_qb_rows.columns else ("sack_rate", lambda s: (s * prior_qb_rows.loc[s.index, "dropbacks"]).sum()),
+                int_count=("int_count", "sum") if "int_count" in prior_qb_rows.columns else ("int_rate", lambda s: (s * prior_qb_rows.loc[s.index, "dropbacks"]).sum()),
             ).sort_values("dropbacks", ascending=False)
 
             top_qb = qb_totals.index[0]
             top_stats = qb_totals.loc[top_qb]
             n_db = int(top_stats["dropbacks"])
             raw_epa = float(top_stats["total_epa"] / n_db) if n_db > 0 else prior_epa
+            weighted_success = float(top_stats["success_count"] / n_db) if n_db > 0 else 0.45
+            weighted_sack = float(top_stats["sack_count"] / n_db) if n_db > 0 else 0.065
+            weighted_int = float(top_stats["int_count"] / n_db) if n_db > 0 else 0.025
 
-            # Apply shrinkage if sample size is below threshold
+            # Apply empirical Bayes shrinkage toward the league QB prior
             shrunk_rating = shrink_qb_rating(raw_epa, n_db, prior_epa=prior_epa, k=SHRINKAGE_K)
             is_shrunk = n_db < min_dropbacks
 
@@ -225,13 +231,30 @@ def compute_rolling_qb_ratings(qb_game_df: pd.DataFrame, window: int = 4, min_dr
                 "qb_dropbacks_window": n_db,
                 "qb_raw_epa": round(raw_epa, 4),
                 "qb_rating": round(shrunk_rating, 4),
-                "qb_success_rate": round(float(top_stats["avg_success"]), 4),
-                "qb_sack_rate": round(float(top_stats["avg_sack"]), 4),
-                "qb_int_rate": round(float(top_stats["avg_int"]), 4),
+                "qb_success_rate": round(weighted_success, 4),
+                "qb_sack_rate": round(weighted_sack, 4),
+                "qb_int_rate": round(weighted_int, 4),
                 "qb_is_shrunk": is_shrunk,
             })
 
     return pd.DataFrame(records)
+
+
+def get_matchup_qb_shock(home_qb_rating, home_team_pass_epa, away_qb_rating, away_team_pass_epa):
+    """
+    Computes orthogonal QB shock feature (diff_qb_shock):
+    Difference between confirmed starting QB's shrunk EPA/dropback (k=60)
+    and the team's rolling pass EPA/dropback, scaled to spread points (* 35 * 0.38).
+    Captures starter injury/return shock without collinearity against diff_pass_epa.
+    """
+    home_shock = (float(home_qb_rating) - float(home_team_pass_epa)) * 35.0 * EPA_TO_SPREAD_POINTS
+    away_shock = (float(away_qb_rating) - float(away_team_pass_epa)) * 35.0 * EPA_TO_SPREAD_POINTS
+    diff_qb_shock = home_shock - away_shock
+    return {
+        "home_qb_shock": round(home_shock, 3),
+        "away_qb_shock": round(away_shock, 3),
+        "diff_qb_shock": round(diff_qb_shock, 3),
+    }
 
 
 def estimate_qb_replacement_penalty(starter_rating: float, backup_rating: float = -0.10, expected_dropbacks: int = 35) -> float:

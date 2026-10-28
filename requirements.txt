@@ -7,3 +7,6 @@ nfl_data_py
 pytz
 requests
 pyyaml
+scipy
+joblib
+pytest

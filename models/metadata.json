@@ -1,4 +1,12 @@
 {
+  "model_version": "v1_points_margin_rest",
+  "feature_columns": [
+    "diff_pf",
+    "diff_pa",
+    "diff_margin",
+    "diff_rest",
+    "division"
+  ],
   "feature_cols": [
     "diff_pf",
     "diff_pa",
@@ -6,7 +14,9 @@
     "diff_rest",
     "division"
   ],
-  "sigma": 13.437304639159333,
+  "sigma": 13.427309592344516,
+  "rmse": 13.427309592344516,
+  "r2": 0.11347914691193539,
   "trained_on_seasons": [
     2023,
     2024,
@@ -15,11 +25,11 @@
   "train_rows": 672,
   "trained_for_season": 2026,
   "coefficients": {
-    "diff_pf": 0.1940972440646006,
-    "diff_pa": -0.07146560617683168,
-    "diff_margin": 0.26556285025029763,
-    "diff_rest": 0.29158240265262986,
-    "division": -0.30500459793771456
+    "diff_pf": 0.19402641346404328,
+    "diff_pa": -0.0714671203878688,
+    "diff_margin": 0.2654935338528259,
+    "diff_rest": 0.29044892213024553,
+    "division": -0.27952919612184624
   },
-  "intercept": 2.480965507829958
+  "intercept": 2.4716407975019044
 }

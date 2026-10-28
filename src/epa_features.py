@@ -169,25 +169,41 @@ def compute_rolling_epa_snapshot(game_epa_df, schedule_df, as_of_utc, window=6, 
 
     past_games = past_games.sort_values("kickoff_utc")
 
+    if as_of_utc is not None:
+        as_of_dt = pd.to_datetime(as_of_utc, utc=True)
+        target_season = as_of_dt.year if as_of_dt.month >= 3 else as_of_dt.year - 1
+    else:
+        target_season = int(game_epa_df["season"].max()) if "season" in game_epa_df.columns else 2026
+
     snapshot = {}
 
     epa_metrics = [
-        "off_pass_epa", "off_rush_epa", "off_total_epa", "off_success_rate",
-        "def_pass_epa", "def_rush_epa", "def_total_epa", "def_success_rate"
+        "off_pass_epa", "off_rush_epa", "off_total_epa", "off_success_rate", "off_early_down_epa",
+        "def_pass_epa", "def_rush_epa", "def_total_epa", "def_success_rate", "def_early_down_epa",
     ]
 
     for team, g in past_games.groupby("team"):
         if len(g) < min_periods:
             continue
 
-        recent = g.tail(window)
+        recent = g.tail(window).copy()
 
+        # Apply off-season regression: explicitly regress prior-season values 50% toward league prior
         team_stats = {"games_played": len(g)}
         for col in epa_metrics:
             if col in recent.columns:
-                team_stats[f"roll_{col}"] = float(recent[col].mean())
+                is_success = "success" in col.lower()
+                league_prior = 0.45 if is_success else 0.0
+
+                raw_vals = recent[col].fillna(league_prior).values
+                regressed_vals = np.array([
+                    (0.50 * v + 0.50 * league_prior) if int(s) < target_season else v
+                    for v, s in zip(raw_vals, recent["season"].values)
+                ], dtype=float)
+
+                team_stats[f"roll_{col}"] = float(np.mean(regressed_vals))
             else:
-                team_stats[f"roll_{col}"] = 0.0
+                team_stats[f"roll_{col}"] = 0.45 if "success" in col.lower() else 0.0
 
         snapshot[team] = team_stats
 
@@ -219,29 +235,35 @@ def get_matchup_epa_features(snapshot, home_team, away_team):
 
     # Home Pass attack vs Away Pass defense:
     # A positive number means Home passes better than Away's defense normally allows.
-    home_pass_matchup = h["roll_off_pass_epa"] - a["roll_def_pass_epa"]
-    away_pass_matchup = a["roll_off_pass_epa"] - h["roll_def_pass_epa"]
+    home_pass_matchup = h.get("roll_off_pass_epa", 0.0) - a.get("roll_def_pass_epa", 0.0)
+    away_pass_matchup = a.get("roll_off_pass_epa", 0.0) - h.get("roll_def_pass_epa", 0.0)
     diff_pass_epa = home_pass_matchup - away_pass_matchup
 
     # Home Rush attack vs Away Rush defense:
-    home_rush_matchup = h["roll_off_rush_epa"] - a["roll_def_rush_epa"]
-    away_rush_matchup = a["roll_off_rush_epa"] - h["roll_def_rush_epa"]
+    home_rush_matchup = h.get("roll_off_rush_epa", 0.0) - a.get("roll_def_rush_epa", 0.0)
+    away_rush_matchup = a.get("roll_off_rush_epa", 0.0) - h.get("roll_def_rush_epa", 0.0)
     diff_rush_epa = home_rush_matchup - away_rush_matchup
 
     # Net success rate difference:
-    home_net_success = h["roll_off_success_rate"] - h["roll_def_success_rate"]
-    away_net_success = a["roll_off_success_rate"] - a["roll_def_success_rate"]
+    home_net_success = h.get("roll_off_success_rate", 0.45) - h.get("roll_def_success_rate", 0.45)
+    away_net_success = a.get("roll_off_success_rate", 0.45) - a.get("roll_def_success_rate", 0.45)
     diff_success_rate = home_net_success - away_net_success
 
     # Total net EPA difference:
-    home_net_epa = h["roll_off_total_epa"] - h["roll_def_total_epa"]
-    away_net_epa = a["roll_off_total_epa"] - a["roll_def_total_epa"]
+    home_net_epa = h.get("roll_off_total_epa", 0.0) - h.get("roll_def_total_epa", 0.0)
+    away_net_epa = a.get("roll_off_total_epa", 0.0) - a.get("roll_def_total_epa", 0.0)
     diff_total_epa = home_net_epa - away_net_epa
+
+    # Early-down scheme efficiency difference:
+    home_early_matchup = h.get("roll_off_early_down_epa", 0.0) - a.get("roll_def_early_down_epa", 0.0)
+    away_early_matchup = a.get("roll_off_early_down_epa", 0.0) - h.get("roll_def_early_down_epa", 0.0)
+    diff_early_down_epa = home_early_matchup - away_early_matchup
 
     return {
         "diff_pass_epa": round(float(diff_pass_epa), 4),
         "diff_rush_epa": round(float(diff_rush_epa), 4),
         "diff_success_rate": round(float(diff_success_rate), 4),
+        "diff_early_down_epa": round(float(diff_early_down_epa), 4),
         "diff_total_epa": round(float(diff_total_epa), 4),
         "home_pass_matchup": round(float(home_pass_matchup), 4),
         "away_pass_matchup": round(float(away_pass_matchup), 4),

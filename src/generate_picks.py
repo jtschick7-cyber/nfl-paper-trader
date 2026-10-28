@@ -16,7 +16,7 @@ from src.config import (
 from src.injury_guard import audit_candidate_pick
 from src.key_numbers import is_integer_spread
 from src.model_utils import DIVISION_MAP, compute_snapshot, cover_probs
-from src.odds_utils import american_to_implied_prob, remove_vig
+from src.odds_utils import american_to_implied_prob, get_cached_live_home_spread, remove_vig
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
 
 MAX_PICKS = int(os.getenv("MAX_PICKS", "5"))
@@ -143,8 +143,13 @@ def main():
             except Exception:
                 pass
 
-        home_rest = int((kickoff - snap[home]["last_date"]).days)
-        away_rest = int((kickoff - snap[away]["last_date"]).days)
+        local_day = kickoff.tz_convert("America/New_York").normalize()
+        h_last = snap[home]["last_date"]
+        a_last = snap[away]["last_date"]
+        h_last_day = h_last.tz_convert("America/New_York").normalize() if getattr(h_last, "tz", None) else pd.to_datetime(h_last, utc=True).tz_convert("America/New_York").normalize()
+        a_last_day = a_last.tz_convert("America/New_York").normalize() if getattr(a_last, "tz", None) else pd.to_datetime(a_last, utc=True).tz_convert("America/New_York").normalize()
+        home_rest = int((local_day - h_last_day).days)
+        away_rest = int((local_day - a_last_day).days)
 
         if home_rest < 0 or away_rest < 0:
             continue
@@ -212,11 +217,14 @@ def main():
             "sigma": sigma,
         }
 
+        live_spread = get_cached_live_home_spread(home, away)
+        curr_line = float(row.get("current_line")) if pd.notna(row.get("current_line")) else (live_spread if live_spread is not None else home_spread)
+
         alert = audit_candidate_pick(
             pick_team=pick_team,
             pick_side=side,
             open_line=home_spread,
-            current_line=home_spread,
+            current_line=curr_line,
             mu_home_margin=mu,
             edge=edge,
             max_auto_edge=MAX_AUTO_EDGE,

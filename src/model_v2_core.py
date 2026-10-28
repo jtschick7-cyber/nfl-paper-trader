@@ -64,6 +64,26 @@ FEATURES = [
 ]
 
 
+class ConstrainedRidgeModel:
+    """
+    Linear model supporting box-constrained regression via augmented least squares.
+    Compatible with scikit-learn Ridge interface (.predict, .coef_, .intercept_, .score).
+    """
+    def __init__(self, coef_, intercept_):
+        self.coef_ = np.array(coef_, dtype=float)
+        self.intercept_ = float(intercept_)
+
+    def predict(self, X):
+        X_arr = np.asarray(X, dtype=float)
+        return X_arr @ self.coef_ + self.intercept_
+
+    def score(self, X, y):
+        y_pred = self.predict(X)
+        u = ((y - y_pred) ** 2).sum()
+        v = ((y - y.mean()) ** 2).sum()
+        return float(1.0 - u / v) if v > 0 else 0.0
+
+
 # ---------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------
@@ -454,21 +474,22 @@ def fit_calibrator(evidence_df):
     ev = ev.dropna(subset=["p_raw", "actual_win"])
     ev = ev[~ev["push"].astype(bool)]
 
-    if len(ev) < MIN_CALIBRATION_ROWS:
-        return ("identity", None)
-
-    y = ev["actual_win"].astype(int).to_numpy()
-
-    if len(np.unique(y)) < 2:
-        return ("identity", None)
-
-    p = np.clip(ev["p_raw"].to_numpy(dtype=float), EPSILON, 1.0 - EPSILON)
-    x = np.log(p / (1.0 - p)).reshape(-1, 1)
-
     if "weight" in ev.columns:
         weights = pd.to_numeric(ev["weight"], errors="coerce").fillna(1.0).to_numpy(dtype=float)
     else:
         weights = np.ones(len(ev), dtype=float)
+
+    eff_n = float(np.sum(weights))
+    if len(ev) < MIN_CALIBRATION_ROWS or eff_n < 500.0:
+        return ("logistic", (0.0, 0.20))
+
+    y = ev["actual_win"].astype(int).to_numpy()
+
+    if len(np.unique(y)) < 2:
+        return ("logistic", (0.0, 0.20))
+
+    p = np.clip(ev["p_raw"].to_numpy(dtype=float), EPSILON, 1.0 - EPSILON)
+    x = np.log(p / (1.0 - p)).reshape(-1, 1)
 
     try:
         model = LogisticRegression(
@@ -479,17 +500,18 @@ def fit_calibrator(evidence_df):
         )
         model.fit(x, y, sample_weight=weights)
     except Exception:
-        return ("identity", None)
+        return ("logistic", (0.0, 0.20))
 
     intercept = float(model.intercept_[0])
     coef = float(model.coef_[0, 0])
 
     if not math.isfinite(intercept) or not math.isfinite(coef):
-        return ("identity", None)
+        return ("logistic", (0.0, 0.20))
 
     # A non-positive slope is not a usable monotonic calibration.
+    # Fall back to conservative shrinkage rather than identity (slope 1.0).
     if coef <= 0.0:
-        return ("identity", None)
+        return ("logistic", (0.0, 0.20))
 
     return ("logistic", (intercept, coef))
 

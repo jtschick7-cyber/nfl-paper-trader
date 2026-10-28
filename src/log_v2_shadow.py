@@ -21,6 +21,7 @@ from src.model_v2_core import (
     remove_vig_scalar,
     safe_float,
 )
+from src.odds_utils import get_cached_live_home_spread
 from src.sheet_utils import get_sheet_as_df
 from src.v2_sheet_utils import get_or_create_worksheet
 
@@ -336,11 +337,14 @@ def main():
             skipped_missing_features += 1
             continue
 
+        live_spread = get_cached_live_home_spread(home, away)
+        curr_line = float(row.get("current_line")) if pd.notna(row.get("current_line")) else (live_spread if live_spread is not None else home_line)
+
         alert = audit_candidate_pick(
             pick_team=best_team,
             pick_side=best_side,
             open_line=home_line,
-            current_line=home_line,
+            current_line=curr_line,
             mu_home_margin=mu,
             edge=best_edge,
             max_auto_edge=MAX_AUTO_EDGE,

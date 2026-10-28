@@ -9,6 +9,7 @@ Usage:
 import argparse
 import os
 import ssl
+import numpy as np
 import pandas as pd
 
 # Fix macOS Python SSL certificate verification error for urllib/nfl_data_py
@@ -43,17 +44,42 @@ def build_features(seasons=None):
             "Install it via: pip install nfl_data_py"
         )
 
-    # Download play-by-play per season with error handling
+    # Download play-by-play per season with local parquet caching
     pbp_dfs = []
     for s in seasons:
         try:
-            print(f"Downloading play-by-play for season {s}...")
-            if hasattr(nfl, "import_pbp_data"):
-                df_s = nfl.import_pbp_data([s], downcast=True)
-            elif hasattr(nfl, "import_pbp"):
-                df_s = nfl.import_pbp([s])
-            else:
-                raise AttributeError("nfl_data_py has neither import_pbp_data nor import_pbp")
+            cache_pbp = os.path.join("data", "epa_cache", f"pbp_{s}.parquet")
+            df_s = None
+            if os.path.exists(cache_pbp):
+                print(f"  Loading cached play-by-play for {s} from {cache_pbp}...")
+                df_s = pd.read_parquet(cache_pbp)
+                if s >= SEASON and df_s is not None and not df_s.empty:
+                    try:
+                        from src.model_utils import _load_sched
+                        sched = _load_sched([s])
+                        comp = sched.dropna(subset=["home_score", "away_score"])
+                        max_sched_week = int(comp["week"].max()) if not comp.empty else 0
+                        max_pbp_week = int(df_s["week"].max()) if "week" in df_s.columns else 0
+                        if max_sched_week > max_pbp_week:
+                            print(f"  PBP cache for {s} is stale (PBP Week {max_pbp_week} vs Sched Week {max_sched_week}). Re-downloading...")
+                            df_s = None
+                    except Exception as e:
+                        print(f"  Warning checking PBP freshness for {s}: {e}")
+
+            if df_s is None:
+                print(f"  Downloading play-by-play for season {s}...")
+                if hasattr(nfl, "import_pbp_data"):
+                    df_s = nfl.import_pbp_data([s], include_participation=False, downcast=True)
+                elif hasattr(nfl, "import_pbp"):
+                    df_s = nfl.import_pbp([s])
+                else:
+                    raise AttributeError("nfl_data_py has neither import_pbp_data nor import_pbp")
+                if df_s is not None and not df_s.empty:
+                    try:
+                        os.makedirs(os.path.dirname(cache_pbp), exist_ok=True)
+                        df_s.to_parquet(cache_pbp, index=False)
+                    except Exception:
+                        pass
 
             if df_s is not None and not df_s.empty:
                 print(f"  Loaded {len(df_s):,} plays for {s}.")

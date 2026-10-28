@@ -23,13 +23,13 @@ while capturing ~75% of maximum compounding growth rate.
 import math
 from dataclasses import dataclass
 import numpy as np
-from scipy.optimize import minimize_scalar
 
 from src.config import BANKROLL_UNITS, FLAT_BET_SIZE
 from src.odds_utils import american_to_implied_prob
 
 DEFAULT_MAX_STAKE_UNITS = 3.0  # Max single-bet exposure limit (3% of bankroll)
 DEFAULT_MIN_STAKE_UNITS = 0.25  # Minimum bet size to warrant placing
+DEFAULT_MAX_SLATE_UNITS = 10.0  # Max total portfolio exposure per weekly slate
 
 
 def american_to_decimal_odds(american_odds: float) -> float:
@@ -65,27 +65,22 @@ def validate_probabilities(win_prob: float, push_prob: float, loss_prob: float =
 
 def full_kelly_fraction(win_prob: float, push_prob: float, loss_prob: float, decimal_odds: float) -> float:
     """
-    Numerically maximizes expected log bankroll growth over ternary outcome space {Win, Push, Loss}.
+    Maximizes expected log bankroll growth over ternary outcome space {Win, Push, Loss}.
+    Uses exact closed-form analytical solution:
+        f* = max(0.0, (w * b - l) / (b * (w + l)))
     """
     w, p, l = validate_probabilities(win_prob, push_prob, loss_prob)
     b = float(decimal_odds) - 1.0
 
-    if b <= 0:
+    if b <= 0.0 or (w + l) <= 0.0:
         return 0.0
 
     # If expected value is non-positive, Kelly fraction is zero (no edge)
     if w * b <= l:
         return 0.0
 
-    # Push outcomes contribute log(1 + 0 * f) = 0 to log growth
-    def negative_expected_log_growth(f):
-        return -(w * math.log1p(f * b) + l * math.log1p(-f))
-
-    res = minimize_scalar(negative_expected_log_growth, bounds=(0.0, 1.0 - 1e-6), method="bounded")
-    if not res.success:
-        return 0.0
-
-    return float(np.clip(res.x, 0.0, 1.0))
+    f = (w * b - l) / (b * (w + l))
+    return float(np.clip(f, 0.0, 1.0))
 
 
 def compute_push_aware_stake(
@@ -127,6 +122,38 @@ def compute_push_aware_stake(
         "flat_units": FLAT_BET_SIZE,
         "is_bounded_by_max": bool(raw_units >= max_stake),
     }
+
+
+def cap_slate_stakes(slate_bets: list, max_slate_exposure: float = DEFAULT_MAX_SLATE_UNITS) -> list:
+    """
+    Applies a portfolio-level simultaneous Kelly exposure constraint to a weekly slate.
+    If the sum of recommended units across all bets on a slate exceeds max_slate_exposure,
+    each bet's stake is scaled proportionally:
+        scale = max_slate_exposure / total_recommended
+        capped_units = round(units * scale, 2)
+    Prevents portfolio overconcentration while preserving relative edge sizing.
+    """
+    if not slate_bets:
+        return []
+
+    total_units = sum(float(b.get("recommended_units", 0.0)) for b in slate_bets)
+
+    if total_units <= max_slate_exposure or total_units <= 0:
+        return slate_bets
+
+    scale_factor = max_slate_exposure / total_units
+    capped_slate = []
+
+    for b in slate_bets:
+        b_copy = dict(b)
+        orig_units = float(b.get("recommended_units", 0.0))
+        capped_units = round(orig_units * scale_factor, 2)
+        b_copy["recommended_units"] = capped_units
+        b_copy["slate_capped"] = True
+        b_copy["orig_units"] = orig_units
+        capped_slate.append(b_copy)
+
+    return capped_slate
 
 
 def main():

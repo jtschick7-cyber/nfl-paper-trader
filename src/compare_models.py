@@ -17,6 +17,7 @@ Outputs:
 import math
 import os
 import sys
+import time
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -28,7 +29,7 @@ except ImportError:
     nfl = None
 
 from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, SEASON
-from src.staking import compute_push_aware_stake
+from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.v2_sheet_utils import get_or_create_worksheet
 
 SCORECARD_TAB = "Model_Scorecard"
@@ -102,7 +103,7 @@ def load_final_scores(season=SEASON):
         return {}
 
 
-def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None):
+def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None):
     """Grades a single spread bet and calculates realized CLV."""
     side = str(side).strip().upper()
     line = float(line)
@@ -133,6 +134,7 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         clv_beat = clv_pts > 0
 
     return {
+        "game_id": game_id,
         "result": result,
         "units": units,
         "clv_points": clv_pts,
@@ -190,8 +192,8 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
     }
 
 
-def evaluate_all_models(master_df, v2_df, v3_df, scores):
-    """Extracts, grades, and aggregates performance across all 3 models."""
+def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
+    """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4)."""
     closing_map = {}
     master_by_gid = {}
     if not master_df.empty:
@@ -227,6 +229,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores):
                     home_score=sc["home_score"],
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
+                    game_id=gid,
                 )
                 v1_bets.append(g)
 
@@ -254,6 +257,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores):
                     home_score=sc["home_score"],
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
+                    game_id=gid,
                 )
                 v2_bets.append(g)
 
@@ -283,13 +287,48 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores):
                     home_score=sc["home_score"],
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
+                    game_id=gid,
                 )
 
-                if dec == "SHADOW_PICK":
+                if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
                     v3_bets.append(g)
-                    if edge >= 0.035:
+                    if dec == "HIGH_CONVICTION" or edge >= 0.035:
                         v3_high_bets.append(g)
                 elif dec == "SUPPRESS_DANGER":
+                    suppressed_bets.append(g)
+
+    # 4. Evaluate v4 (V4_Shadow)
+    v4_bets = []
+    v4_high_bets = []
+    if v4_df is not None and not v4_df.empty:
+        for _, row in v4_df.iterrows():
+            gid = str(row.get("game_id", "")).strip()
+            dec = str(row.get("v4_decision", "")).strip().upper()
+            side = str(row.get("v4_best_side", "")).strip().upper()
+            line = safe_float(row.get("v4_best_line"))
+            odds = safe_float(row.get("v4_best_odds"), -110.0)
+            edge = safe_float(row.get("v4_edge"), 0.0)
+
+            if line is None or not side:
+                continue
+
+            if gid in scores:
+                sc = scores[gid]
+                g = grade_single_bet(
+                    side=side,
+                    line=line,
+                    odds=odds,
+                    home_score=sc["home_score"],
+                    away_score=sc["away_score"],
+                    closing_line=closing_map.get(gid),
+                    game_id=gid,
+                )
+
+                if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
+                    v4_bets.append(g)
+                    if dec == "HIGH_CONVICTION" or edge >= 0.035:
+                        v4_high_bets.append(g)
+                elif dec == "SUPPRESS_DANGER" and gid not in [b.get("game_id") for b in suppressed_bets]:
                     suppressed_bets.append(g)
 
     summary_rows = [
@@ -299,23 +338,33 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores):
         compute_metrics(v3_high_bets, "Model v3 High-Conviction (>=3.5%)", "High-Conviction"),
     ]
 
+    if v4_df is not None and not v4_df.empty:
+        summary_rows.append(compute_metrics(v4_bets, "Model v4 (EPA+QB+Luck+Totals)", "All Picks"))
+        summary_rows.append(compute_metrics(v4_high_bets, "Model v4 High-Conviction (>=3.5%)", "High-Conviction"))
+
     # Guard audit (what would have happened to suppressed danger bets?)
     guard_metrics = compute_metrics(suppressed_bets, "Guard Suppressed Danger Bets", "Hypothetical Placed")
 
-    return summary_rows, guard_metrics, {
+    counts_dict = {
         "v1_count": len(v1_bets),
         "v2_count": len(v2_bets),
         "v3_count": len(v3_bets),
         "v3_high_count": len(v3_high_bets),
+        "v4_count": len(v4_bets),
+        "v4_high_count": len(v4_high_bets),
         "suppressed_count": len(suppressed_bets),
     }
 
+    return summary_rows, guard_metrics, counts_dict
 
-def build_head_to_head_slate(master_df, v2_df, v3_df):
-    """Builds a side-by-side comparison matrix for the active upcoming week."""
-    # Find current active week
+
+def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
+    """Builds a side-by-side comparison matrix for the active upcoming week across v1, v2, v3, v4."""
     all_weeks = []
-    for df in [master_df, v2_df, v3_df]:
+    dfs_to_check = [master_df, v2_df, v3_df]
+    if v4_df is not None and not v4_df.empty:
+        dfs_to_check.append(v4_df)
+    for df in dfs_to_check:
         if not df.empty and "week" in df.columns:
             w_vals = pd.to_numeric(df["week"], errors="coerce").dropna()
             all_weeks.extend(w_vals.tolist())
@@ -326,26 +375,69 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
     m_dict = {str(r.get("game_id", "")).strip(): r for _, r in master_df.iterrows()} if not master_df.empty else {}
     v2_dict = {str(r.get("game_id", "")).strip(): r for _, r in v2_df.iterrows()} if not v2_df.empty else {}
     v3_dict = {str(r.get("game_id", "")).strip(): r for _, r in v3_df.iterrows()} if not v3_df.empty else {}
+    v4_dict = {str(r.get("game_id", "")).strip(): r for _, r in v4_df.iterrows()} if (v4_df is not None and not v4_df.empty) else {}
 
-    all_gids = set(m_dict.keys()) | set(v2_dict.keys()) | set(v3_dict.keys())
+    all_gids = set(m_dict.keys()) | set(v2_dict.keys()) | set(v3_dict.keys()) | set(v4_dict.keys())
 
-    slate_rows = []
+    # Pre-compute and cap portfolio stakes across the active slate (per-week)
+    from collections import defaultdict
+    v3_by_week = defaultdict(list)
+    v4_by_week = defaultdict(list)
+
     for gid in sorted(all_gids):
+        r4 = v4_dict.get(gid, {})
         r3 = v3_dict.get(gid, {})
         r2 = v2_dict.get(gid, {})
         rm = m_dict.get(gid, {})
 
-        ko_raw = r3.get("kickoff_utc") or rm.get("kickoff_time") or r2.get("kickoff_utc")
+        w = safe_int(r4.get("week") or r3.get("week") or rm.get("week") or r2.get("week"), 8)
+
+        v3_dec = str(r3.get("v3_decision", "")).strip().upper()
+        if v3_dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
+            v3_odds = safe_float(r3.get("v3_best_odds"), -110.0)
+            v3_prob = safe_float(r3.get("v3_model_probability"), 0.52)
+            p_push = safe_float(r3.get("p_push"), 0.05)
+            uncond_win_prob = v3_prob * (1.0 - p_push)
+            s_info = compute_push_aware_stake(uncond_win_prob, p_push, v3_odds)
+            v3_by_week[w].append({"game_id": gid, "recommended_units": s_info["recommended_units"]})
+
+        r4 = v4_dict.get(gid, {})
+        v4_dec = str(r4.get("v4_decision", "")).strip().upper()
+        if v4_dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
+            v4_odds = safe_float(r4.get("v4_best_odds"), -110.0)
+            v4_prob = safe_float(r4.get("v4_model_probability"), 0.52)
+            p_push_4 = safe_float(r4.get("p_push"), 0.05)
+            uncond_win_prob_4 = v4_prob * (1.0 - p_push_4)
+            s_info_4 = compute_push_aware_stake(uncond_win_prob_4, p_push_4, v4_odds)
+            v4_by_week[w].append({"game_id": gid, "recommended_units": s_info_4["recommended_units"]})
+
+    v3_capped_map = {}
+    for w, cands in v3_by_week.items():
+        for b in cap_slate_stakes(cands, max_slate_exposure=10.0):
+            v3_capped_map[b["game_id"]] = b["recommended_units"]
+
+    v4_capped_map = {}
+    for w, cands in v4_by_week.items():
+        for b in cap_slate_stakes(cands, max_slate_exposure=10.0):
+            v4_capped_map[b["game_id"]] = b["recommended_units"]
+
+    slate_rows = []
+    for gid in sorted(all_gids):
+        r4 = v4_dict.get(gid, {})
+        r3 = v3_dict.get(gid, {})
+        r2 = v2_dict.get(gid, {})
+        rm = m_dict.get(gid, {})
+
+        ko_raw = r4.get("kickoff_utc") or r3.get("kickoff_utc") or rm.get("kickoff_time") or r2.get("kickoff_utc")
         ko = pd.to_datetime(ko_raw, utc=True, errors="coerce")
 
-        # Focus on upcoming games or active week
-        week = safe_int(r3.get("week") or rm.get("week") or r2.get("week"), 8)
-        matchup = str(r3.get("matchup") or rm.get("matchup") or f"{rm.get('away_team','')} @ {rm.get('home_team','')}").strip()
+        week = safe_int(r4.get("week") or r3.get("week") or rm.get("week") or r2.get("week"), 8)
+        matchup = str(r4.get("matchup") or r3.get("matchup") or rm.get("matchup") or f"{rm.get('away_team','')} @ {rm.get('home_team','')}").strip()
         if not matchup or matchup == "@":
             continue
 
-        h_line = safe_float(r3.get("home_line") or rm.get("opening_line") or r2.get("home_line"))
-        h_odds = safe_float(r3.get("home_odds") or rm.get("opening_odds") or r2.get("home_odds"))
+        h_line = safe_float(r4.get("home_line") or r3.get("home_line") or rm.get("opening_line") or r2.get("home_line"))
+        h_odds = safe_float(r4.get("home_odds") or r3.get("home_odds") or rm.get("opening_odds") or r2.get("home_odds"))
 
         # v1 Pick
         v1_team = str(rm.get("pick_team", "")).strip().upper()
@@ -364,19 +456,39 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
         v3_line = safe_float(r3.get("v3_best_line"))
         v3_edge = safe_float(r3.get("v3_edge"), 0.0)
 
-        if v3_dec == "SHADOW_PICK":
+        if v3_dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
             v3_odds = safe_float(r3.get("v3_best_odds"), -110.0)
             v3_prob = safe_float(r3.get("v3_model_probability"), 0.52)
             p_push = safe_float(r3.get("p_push"), 0.05)
-            stake_info = compute_push_aware_stake(v3_prob, p_push, v3_odds)
-            stake_units = stake_info["recommended_units"]
+            uncond_win_prob = v3_prob * (1.0 - p_push)
+            stake_units = v3_capped_map.get(gid, compute_push_aware_stake(uncond_win_prob, p_push, v3_odds)["recommended_units"])
             v3_pick_str = f"{v3_team} {v3_line:+.1f} (+{v3_edge*100:.1f}%) [{stake_units:.1f}u]"
-            if v3_edge >= 0.035:
+            if v3_dec == "HIGH_CONVICTION" or v3_edge >= 0.035:
                 v3_pick_str += " ★"
         elif v3_dec == "SUPPRESS_DANGER":
             v3_pick_str = "SUPPRESS_DANGER"
         else:
             v3_pick_str = "PASS"
+
+        # v4 Pick & Edge
+        v4_dec = str(r4.get("v4_decision", "")).strip().upper()
+        v4_team = str(r4.get("v4_best_team", "")).strip().upper()
+        v4_line = safe_float(r4.get("v4_best_line"))
+        v4_edge = safe_float(r4.get("v4_edge"), 0.0)
+
+        if v4_dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
+            v4_odds = safe_float(r4.get("v4_best_odds"), -110.0)
+            v4_prob = safe_float(r4.get("v4_model_probability"), 0.52)
+            p_push_4 = safe_float(r4.get("p_push"), 0.05)
+            uncond_win_prob_4 = v4_prob * (1.0 - p_push_4)
+            stake_units_4 = v4_capped_map.get(gid, compute_push_aware_stake(uncond_win_prob_4, p_push_4, v4_odds)["recommended_units"])
+            v4_pick_str = f"{v4_team} {v4_line:+.1f} (+{v4_edge*100:.1f}%) [{stake_units_4:.1f}u]"
+            if v4_dec == "HIGH_CONVICTION" or v4_edge >= 0.035:
+                v4_pick_str += " ★"
+        elif v4_dec == "SUPPRESS_DANGER":
+            v4_pick_str = "SUPPRESS_DANGER"
+        else:
+            v4_pick_str = "PASS"
 
         # Consensus evaluation
         picks = []
@@ -384,8 +496,10 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
             picks.append(("v1", v1_team))
         if v2_pick_str not in {"PASS", "SUPPRESS", ""}:
             picks.append(("v2", v2_team))
-        if v3_dec == "SHADOW_PICK" and v3_team:
+        if v3_dec in {"SHADOW_PICK", "HIGH_CONVICTION"} and v3_team:
             picks.append(("v3", v3_team))
+        if v4_dec in {"SHADOW_PICK", "HIGH_CONVICTION"} and v4_team:
+            picks.append(("v4", v4_team))
 
         if not picks:
             consensus = "ALL PASS"
@@ -406,8 +520,10 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
             "v1_pick": v1_pick_str,
             "v2_pick": v2_pick_str,
             "v3_pick": v3_pick_str,
+            "v4_pick": v4_pick_str,
             "consensus": consensus,
             "v3_decision": v3_dec,
+            "v4_decision": v4_dec,
             "is_future": bool(pd.notna(ko) and ko > now_utc),
         })
 
@@ -416,29 +532,29 @@ def build_head_to_head_slate(master_df, v2_df, v3_df):
 
 def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
     """Renders a clean CLI dashboard."""
-    print("\n" + "=" * 90)
-    print("           NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3)           ")
-    print("=" * 90)
+    print("\n" + "=" * 94)
+    print("        NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3 vs v4)       ")
+    print("=" * 94)
 
-    print(f"{'Model / Architecture':<34} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8}")
-    print("-" * 90)
+    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8}")
+    print("-" * 94)
 
     for row in summary_rows:
         u_str = f"{row['units']:+.2f}u" if row['bets'] > 0 else "0.00u"
         roi_str = f"{row['roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
         clv_str = f"{row['clv_beat_pct']:.1f}%" if row['bets'] > 0 else "0.0%"
-        print(f"{row['model']:<34} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8}")
+        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8}")
 
-    print("-" * 90)
+    print("-" * 94)
     g_bets = guard_metrics['bets']
     if g_bets > 0:
         g_units = f"{guard_metrics['units']:+.2f}u"
         saved = -guard_metrics['units']
         saved_str = f"{saved:+.2f}u" if saved > 0 else "0.00u"
-        print(f"{'Guard Suppressed Bets (Saved)':<34} | {g_bets:<5} | {guard_metrics['record']:<14} | Would Have PnL: {g_units} (Estimated Saved: {saved_str})")
+        print(f"{'Guard Suppressed Bets (Saved)':<35} | {g_bets:<5} | {guard_metrics['record']:<14} | Would Have PnL: {g_units} (Estimated Saved: {saved_str})")
     else:
-        print(f"{'Guard Suppressed Bets (Saved)':<34} | 0     | 0W - 0L - 0P   | No completed games with suppressed danger yet.")
-    print("=" * 90)
+        print(f"{'Guard Suppressed Bets (Saved)':<35} | 0     | 0W - 0L - 0P   | No completed games with suppressed danger yet.")
+    print("=" * 94)
 
     # Active week slate
     if not slate_df.empty:
@@ -446,14 +562,14 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
         if future_slate.empty:
             future_slate = slate_df.tail(16).copy()
 
-        print("\n" + "=" * 90)
-        print("                 ACTIVE SLATE HEAD-TO-HEAD PICKS MATRIX                   ")
-        print("=" * 90)
-        print(f"{'Matchup':<12} | {'Spread':<7} | {'v1 Baseline':<14} | {'v2 Elo/Rest':<14} | {'v3 EPA-Enhanced':<24} | {'Consensus':<14}")
-        print("-" * 90)
+        print("\n" + "=" * 115)
+        print("                        ACTIVE SLATE HEAD-TO-HEAD PICKS MATRIX                             ")
+        print("=" * 115)
+        print(f"{'Matchup':<12} | {'Spread':<7} | {'v1 Baseline':<13} | {'v2 Elo/Rest':<13} | {'v3 EPA-Keys':<22} | {'v4 Full-Matrix':<22} | {'Consensus':<13}")
+        print("-" * 115)
         for _, r in future_slate.iterrows():
-            print(f"{r['matchup']:<12} | {r['market_home_line']:<7} | {r['v1_pick']:<14} | {r['v2_pick']:<14} | {r['v3_pick']:<24} | {r['consensus']:<14}")
-        print("=" * 90 + "\n")
+            print(f"{r['matchup']:<12} | {r['market_home_line']:<7} | {r['v1_pick']:<13} | {r['v2_pick']:<13} | {r['v3_pick']:<22} | {r.get('v4_pick','-'):<22} | {r['consensus']:<13}")
+        print("=" * 115 + "\n")
 
 
 def publish_github_summary(summary_rows, guard_metrics, slate_df):
@@ -480,8 +596,8 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
         md_lines.append(f"| 🛡️ *Injury/RLM Suppressed (Saved)* | {guard_metrics['bets']} | {guard_metrics['record']} | - | Would PnL: {guard_metrics['units']:+.2f}u | Saved: **{saved_str}** | - |")
 
     md_lines.append("\n### 📋 Active Slate Head-to-Head Comparison\n")
-    md_lines.append("| Matchup | Market Spread | v1 Baseline | v2 Elo/Rest | v3 EPA-Enhanced | Consensus |")
-    md_lines.append("| :--- | :---: | :---: | :---: | :--- | :---: |")
+    md_lines.append("| Matchup | Market Spread | v1 Baseline | v2 Elo/Rest | v3 EPA-Enhanced | v4 Full Matrix | Consensus |")
+    md_lines.append("| :--- | :---: | :---: | :---: | :--- | :--- | :---: |")
 
     if not slate_df.empty:
         future_slate = slate_df[slate_df["is_future"]].copy()
@@ -489,7 +605,8 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
             future_slate = slate_df.tail(16).copy()
 
         for _, r in future_slate.iterrows():
-            md_lines.append(f"| **{r['matchup']}** | {r['market_home_line']} | `{r['v1_pick']}` | `{r['v2_pick']}` | `{r['v3_pick']}` | **{r['consensus']}** |")
+            v4_p = r.get("v4_pick", "-")
+            md_lines.append(f"| **{r['matchup']}** | {r['market_home_line']} | `{r['v1_pick']}` | `{r['v2_pick']}` | `{r['v3_pick']}` | `{v4_p}` | **{r['consensus']}** |")
 
     try:
         with open(summary_path, "a", encoding="utf-8") as f:
@@ -505,12 +622,12 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
     now_et_str = datetime.now(pytz.timezone(LOCAL_TZ)).strftime("%Y-%m-%d %I:%M %p %Z")
 
     rows = []
-    rows.append(["NFL MULTI-MODEL PERFORMANCE SCORECARD", "", "", "", "", "", ""])
-    rows.append([f"Updated: {now_utc_str} ({now_et_str})", "", "", "", "", "", ""])
+    rows.append(["NFL MULTI-MODEL PERFORMANCE SCORECARD", "", "", "", "", "", "", "", ""])
+    rows.append([f"Updated: {now_utc_str} ({now_et_str})", "", "", "", "", "", "", "", ""])
     rows.append([""])
 
     # Section 1: Summary Table
-    rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", ""])
+    rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", "", "", ""])
     rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "Avg CLV Pts"])
 
     for r in summary_rows:
@@ -546,8 +663,8 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
     rows.append([""])
 
     # Section 2: Active Slate
-    rows.append(["ACTIVE SLATE HEAD-TO-HEAD MATRIX", "", "", "", "", "", ""])
-    rows.append(["Week", "Matchup", "Kickoff (UTC)", "Market Spread", "v1 Baseline", "v2 Elo/Rest", "v3 EPA-Enhanced", "Consensus"])
+    rows.append(["ACTIVE SLATE HEAD-TO-HEAD MATRIX", "", "", "", "", "", "", "", ""])
+    rows.append(["Week", "Matchup", "Kickoff (UTC)", "Market Spread", "v1 Baseline", "v2 Elo/Rest", "v3 EPA-Enhanced", "v4 Full Matrix", "Consensus"])
 
     if not slate_df.empty:
         future_slate = slate_df[slate_df["is_future"]].copy()
@@ -563,16 +680,24 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
                 r["v1_pick"],
                 r["v2_pick"],
                 r["v3_pick"],
+                r.get("v4_pick", "-"),
                 r["consensus"],
             ])
 
-    try:
-        ws = get_or_create_worksheet(SCORECARD_TAB)
-        ws.clear()
-        ws.update(values=rows, range_name="A1")
-        print(f"Successfully updated '{SCORECARD_TAB}' tab in Google Sheets.")
-    except (Exception, SystemExit) as exc:
-        print(f"Warning: Could not write to Google Sheets '{SCORECARD_TAB}': {exc}")
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            ws = get_or_create_worksheet(SCORECARD_TAB)
+            ws.clear()
+            ws.update(values=rows, range_name="A1")
+            print(f"Successfully updated '{SCORECARD_TAB}' tab in Google Sheets.")
+            break
+        except (Exception, SystemExit) as exc:
+            if attempt < max_retries and any(err in str(exc) for err in ("429", "Quota", "500", "502", "503", "504")):
+                time.sleep(5 * attempt)
+                continue
+            print(f"Warning: Could not write to Google Sheets '{SCORECARD_TAB}': {exc}")
+            break
 
 
 def build_mock_data():
@@ -630,7 +755,22 @@ def build_mock_data():
         {"game_id": "2026_08_NE_MIA", "week": 8, "matchup": "NE @ MIA", "home_team": "MIA", "away_team": "NE", "home_line": 8.5, "v3_decision": "SUPPRESS_DANGER", "v3_best_team": "NE", "v3_best_side": "AWAY", "v3_best_line": -8.5, "v3_best_odds": -110.0, "v3_edge": 0.0153, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
     ]
 
-    return pd.DataFrame(master_rows), pd.DataFrame(v2_rows), pd.DataFrame(v3_rows), settled_scores
+    # V4_Shadow
+    v4_rows = [
+        {"game_id": "2026_01_BAL_KC", "week": 1, "v4_decision": "SHADOW_PICK", "v4_best_team": "KC", "v4_best_side": "HOME", "v4_best_line": -3.0, "v4_best_odds": -110.0, "v4_edge": 0.032},
+        {"game_id": "2026_01_GB_PHI", "week": 1, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "PHI", "v4_best_side": "HOME", "v4_best_line": -2.5, "v4_best_odds": -105.0, "v4_edge": 0.041},
+        {"game_id": "2026_02_CIN_KC", "week": 2, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "CIN", "v4_best_side": "AWAY", "v4_best_line": 5.5, "v4_best_odds": -110.0, "v4_edge": 0.039},
+        {"game_id": "2026_02_CHI_HOU", "week": 2, "v4_decision": "PASS", "v4_edge": 0.012},
+        # Active Week 8
+        {"game_id": "2026_08_CAR_GB", "week": 8, "matchup": "CAR @ GB", "home_team": "GB", "away_team": "CAR", "home_line": -3.0, "v4_decision": "SHADOW_PICK", "v4_best_team": "GB", "v4_best_side": "HOME", "v4_best_line": -3.0, "v4_best_odds": -105.0, "v4_edge": 0.0245, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
+        {"game_id": "2026_08_LV_NYJ", "week": 8, "matchup": "LV @ NYJ", "home_team": "NYJ", "away_team": "LV", "home_line": 1.5, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "LV", "v4_best_side": "AWAY", "v4_best_line": -1.5, "v4_best_odds": 105.0, "v4_edge": 0.0382, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
+        {"game_id": "2026_08_MIN_DET", "week": 8, "matchup": "MIN @ DET", "home_team": "DET", "away_team": "MIN", "home_line": -2.5, "v4_decision": "PASS", "v4_edge": 0.0142, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
+        {"game_id": "2026_08_LAC_LA", "week": 8, "matchup": "LAC @ LA", "home_team": "LA", "away_team": "LAC", "home_line": -7.0, "v4_decision": "SHADOW_PICK", "v4_best_team": "LA", "v4_best_side": "HOME", "v4_best_line": -7.0, "v4_best_odds": -105.0, "v4_edge": 0.0260, "kickoff_utc": "2026-11-01 21:05:00+00:00"},
+        {"game_id": "2026_08_TEN_CIN", "week": 8, "matchup": "TEN @ CIN", "home_team": "CIN", "away_team": "TEN", "home_line": -10.0, "v4_decision": "SUPPRESS_DANGER", "v4_best_team": "CIN", "v4_best_side": "HOME", "v4_best_line": -10.0, "v4_best_odds": -110.0, "v4_edge": 0.0210, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
+        {"game_id": "2026_08_NE_MIA", "week": 8, "matchup": "NE @ MIA", "home_team": "MIA", "away_team": "NE", "home_line": 8.5, "v4_decision": "PASS", "v4_edge": 0.008, "kickoff_utc": "2026-11-01 18:00:00+00:00"},
+    ]
+
+    return pd.DataFrame(master_rows), pd.DataFrame(v2_rows), pd.DataFrame(v3_rows), pd.DataFrame(v4_rows), settled_scores
 
 
 def main():
@@ -640,7 +780,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("Running Multi-Model Comparison Engine (v1 vs v2 vs v3)...")
+    print("Running Multi-Model Comparison Engine (v1 vs v2 vs v3 vs v4)...")
     print("=" * 70)
 
     has_creds = bool(os.getenv("GSHEET_CREDENTIALS") and os.getenv("SPREADSHEET_ID"))
@@ -651,15 +791,20 @@ def main():
             print("Running demonstration test with sample Week 8 and historical data...\n")
         else:
             print("Running in test mode with demonstration sample data...\n")
-        master_df, v2_df, v3_df, scores = build_mock_data()
+        master_df, v2_df, v3_df, v4_df, scores = build_mock_data()
     else:
         # 1. Pull Live Data from Google Sheets
         master_df = fetch_tab_df(MASTER_SHEET_NAME)
         v2_df = fetch_tab_df("V2_Shadow")
         v3_df = fetch_tab_df("V3_Shadow")
+        v4_df = fetch_tab_df("V4_Shadow")
 
-        if master_df.empty and v2_df.empty and v3_df.empty:
-            print("No data available in Google Sheet tabs.")
+        # Fallback to local cache if Google Sheet tabs are empty
+        if v4_df.empty and os.path.exists("data/v4_shadow_picks.csv"):
+            v4_df = pd.read_csv("data/v4_shadow_picks.csv")
+
+        if master_df.empty and v2_df.empty and v3_df.empty and v4_df.empty:
+            print("No data available in Google Sheet tabs or local shadow caches.")
             return
 
         # 2. Fetch ground truth scores from nflverse
@@ -667,10 +812,10 @@ def main():
         print(f"Loaded finalized scores for {len(scores)} games in season {SEASON}.")
 
     # 3. Grade & Aggregate Performance
-    summary_rows, guard_metrics, counts = evaluate_all_models(master_df, v2_df, v3_df, scores)
+    summary_rows, guard_metrics, counts = evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=v4_df)
 
     # 4. Build Active Slate Comparison
-    slate_df = build_head_to_head_slate(master_df, v2_df, v3_df)
+    slate_df = build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=v4_df)
 
     # 5. Output to Console, GitHub Actions, and Google Sheets
     print_terminal_dashboard(summary_rows, guard_metrics, slate_df)

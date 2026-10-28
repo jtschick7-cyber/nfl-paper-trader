@@ -14,19 +14,22 @@ Evaluates future games using:
 
 import math
 import os
+import time
 from datetime import datetime
 import joblib
 import numpy as np
 import pandas as pd
 import pytz
 
-from src.config import MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON
+from src.config import GSHEET_CREDENTIALS, MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON, SPREADSHEET_ID
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.injury_guard import audit_candidate_pick
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
-from src.odds_utils import american_to_implied_prob, remove_vig
+from src.model_v2_core import ConstrainedRidgeModel, calibrate_probability
+from src.odds_utils import american_to_implied_prob, get_cached_live_home_spread, remove_vig
 from src.sheet_utils import get_sheet_as_df
+from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.v2_sheet_utils import get_or_create_worksheet
 
 MODEL_PATH = "models/nfl_spread_model_v3.pkl"
@@ -124,6 +127,91 @@ def ensure_headers(ws):
         ws.update([HEADERS], "A1")
 
 
+def ensure_epa_cache_is_current():
+    """Builds or refreshes EPA cache if missing or if schedule has newer completed weeks."""
+    if not os.path.exists(EPA_DATA_PATH):
+        print(f"EPA data missing at {EPA_DATA_PATH}. Building on the fly...")
+        from src.build_features import build_features
+        build_features()
+        return
+
+    try:
+        epa_df = pd.read_csv(EPA_DATA_PATH)
+        curr_epa = epa_df[epa_df["season"] == SEASON]
+        max_epa_week = int(curr_epa["week"].max()) if not curr_epa.empty else 0
+
+        sched = _load_sched([SEASON])
+        completed = sched.dropna(subset=["home_score", "away_score"])
+        max_sched_week = int(completed["week"].max()) if not completed.empty else 0
+
+        if max_sched_week > max_epa_week:
+            mtime = os.path.getmtime(EPA_DATA_PATH)
+            if time.time() - mtime > 6 * 3600:
+                print(f"EPA data is stale (Week {max_epa_week} vs Schedule Week {max_sched_week}). Refreshing...")
+                from src.build_features import build_features
+                build_features()
+    except Exception as e:
+        print(f"Warning checking EPA cache freshness: {e}")
+
+
+def get_point_in_time_context(completed_games, home, away, kickoff):
+    """
+    Computes true point-in-time Elo differential, rolling 4-game margin differential,
+    and Eastern calendar rest differential from completed games up to kickoff.
+    """
+    past = completed_games[completed_games["kickoff_utc"] < kickoff]
+    elo_ratings = {}
+    team_last_date = {}
+    team_margins = {}
+    current_season = None
+
+    for _, g in past.iterrows():
+        s = int(g["season"])
+        if current_season is not None and s != current_season:
+            for t in elo_ratings:
+                elo_ratings[t] = elo_ratings[t] * (1.0 - ELO_REVERSION) + ELO_INITIAL * ELO_REVERSION
+        current_season = s
+
+        h = str(g["home_team"]).upper().strip()
+        a = str(g["away_team"]).upper().strip()
+        margin = float(g["home_score"]) - float(g["away_score"])
+
+        h_elo = elo_ratings.get(h, ELO_INITIAL)
+        a_elo = elo_ratings.get(a, ELO_INITIAL)
+        new_h, new_a = update_elo(h_elo, a_elo, margin)
+        elo_ratings[h] = new_h
+        elo_ratings[a] = new_a
+
+        ko_day = g["kickoff_utc"].tz_convert("America/New_York").normalize()
+        team_last_date[h] = ko_day
+        team_last_date[a] = ko_day
+
+        team_margins.setdefault(h, []).append(margin)
+        team_margins.setdefault(a, []).append(-margin)
+
+    # Elo diff
+    h_elo = elo_ratings.get(home, ELO_INITIAL)
+    a_elo = elo_ratings.get(away, ELO_INITIAL)
+    elo_diff = ((h_elo + ELO_HFA) - a_elo) / 25.0
+
+    # Margin diff (last 4 games)
+    h_m = team_margins.get(home, [])
+    a_m = team_margins.get(away, [])
+    h_roll = float(np.mean(h_m[-4:])) if len(h_m) >= 2 else 0.0
+    a_roll = float(np.mean(a_m[-4:])) if len(a_m) >= 2 else 0.0
+    diff_margin = h_roll - a_roll
+
+    # Rest diff (Eastern calendar days)
+    target_day = kickoff.tz_convert("America/New_York").normalize()
+    h_last = team_last_date.get(home)
+    a_last = team_last_date.get(away)
+    h_rest = min((target_day - h_last).days, 21) if h_last else 7
+    a_rest = min((target_day - a_last).days, 21) if a_last else 7
+    diff_rest = float(h_rest - a_rest)
+
+    return elo_diff, diff_margin, diff_rest
+
+
 def main():
     print("=============================================================")
     print("Logging v3 EPA-Enhanced shadow evaluations")
@@ -134,19 +222,23 @@ def main():
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Missing v3 model artifact: {MODEL_PATH}\nRun: python -m src.train_model_v3")
 
-    if not os.path.exists(EPA_DATA_PATH):
-        print(f"EPA data missing at {EPA_DATA_PATH}. Building on the fly...")
-        from src.build_features import build_features
-        build_features()
+    ensure_epa_cache_is_current()
 
     artifact = joblib.load(MODEL_PATH)
     feature_columns = artifact["feature_columns"]
     scaler = artifact["scaler"]
     ridge = artifact["ridge"]
     sigma = float(artifact["sigma"])
-    calibrator = artifact["calibrator"]
+    calibrator_method = artifact.get("calibrator_method", "identity")
+    calibrator_params = artifact.get("calibrator_params")
+    calibrator = artifact.get("calibrator", (calibrator_method, calibrator_params))
 
     epa_df = pd.read_csv(EPA_DATA_PATH)
+    has_creds = bool((GSHEET_CREDENTIALS or os.getenv("GSHEET_CREDENTIALS")) and (SPREADSHEET_ID or os.getenv("SPREADSHEET_ID")))
+    if not has_creds:
+        print("Notice: GSHEET_CREDENTIALS / SPREADSHEET_ID not detected. Exiting shadow evaluation.")
+        return
+
     sheet_df = get_sheet_as_df()
 
     if sheet_df.empty:
@@ -156,8 +248,9 @@ def main():
     now_utc = datetime.now(pytz.utc)
 
     # Load schedule for Elo and timeline tracking
-    sched = _load_sched([SEASON - 1, SEASON])
+    sched = _load_sched(list(range(2020, SEASON + 1)))
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True, errors="coerce")
+    completed_sched = sched.dropna(subset=["home_score", "away_score", "kickoff_utc"]).sort_values("kickoff_utc").reset_index(drop=True)
 
     # Connect to Google Sheets
     ws = get_or_create_worksheet(SHADOW_TAB)
@@ -240,9 +333,7 @@ def main():
         h_div = DIVISION_MAP.get(home)
         a_div = DIVISION_MAP.get(away)
         division = 1.0 if h_div and a_div and h_div == a_div else 0.0
-        diff_rest = 0.0  # Default rest differential
-        diff_margin = 0.0
-        elo_diff = 0.0  # Model default
+        elo_diff, diff_margin, diff_rest = get_point_in_time_context(completed_sched, home, away, kickoff)
 
         feat_vals = {
             "elo_diff": elo_diff,
@@ -263,10 +354,15 @@ def main():
         p_home_discrete = float(spread_res["cond_home_win"])
         p_push = float(spread_res["p_push"])
 
-        # Platt Calibration
-        try:
-            p_home_cal = float(calibrator.predict_proba([[p_home_discrete]])[0][1])
-        except Exception:
+        # Probability Calibration
+        if isinstance(calibrator, tuple):
+            p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
+        elif hasattr(calibrator, "predict_proba"):
+            try:
+                p_home_cal = float(calibrator.predict_proba([[p_home_discrete]])[0][1])
+            except Exception:
+                p_home_cal = p_home_discrete
+        else:
             p_home_cal = p_home_discrete
         p_away_cal = 1.0 - p_home_cal
 
@@ -296,12 +392,28 @@ def main():
             best_fair_p = fair_a
             best_edge = edge_away
 
-        # Pre-bet integrity audit
+        # Pre-bet integrity audit (with active line comparison)
+        curr_line = home_line
+        if pd.notna(row.get("current_line")):
+            try:
+                curr_line = float(row.get("current_line"))
+            except Exception:
+                pass
+        elif pd.notna(row.get("closing_line")):
+            try:
+                curr_line = float(row.get("closing_line"))
+            except Exception:
+                pass
+        else:
+            live_spread = get_cached_live_home_spread(home, away)
+            if live_spread is not None:
+                curr_line = live_spread
+
         alert = audit_candidate_pick(
             pick_team=best_team,
             pick_side=best_side,
             open_line=home_line,
-            current_line=home_line,
+            current_line=curr_line,
             mu_home_margin=mu,
             edge=best_edge,
             max_auto_edge=MAX_AUTO_EDGE,

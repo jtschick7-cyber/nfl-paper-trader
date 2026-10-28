@@ -1,9 +1,6 @@
 name: V3 Shadow Logger
 
 on:
-  schedule:
-    # Run on Tuesdays at 11:35 AM, 2:35 PM, 7:35 PM EDT (UTC 15:35, 18:35, 23:35)
-    - cron: "35 15,18,23 * * 2"
   workflow_dispatch:
 
 permissions:
@@ -16,7 +13,7 @@ concurrency:
 jobs:
   log:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -31,14 +28,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Refresh EPA features
+        run: python -m src.build_features
+
       - name: Log v3 EPA shadow evaluations
         run: python -m src.log_v3_shadow
+
+      - name: Log v4 full-matrix shadow evaluations
+        run: python -m src.log_v4_shadow
 
       - name: Compare models and update scorecard
         run: python -m src.compare_models

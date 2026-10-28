@@ -63,7 +63,10 @@ def parse_pbp_turnovers(pbp_df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index().rename(columns={"posteam": "team"})
 
     # Aggregate by defense (defteam)
+    # On defense: opp fumbles seen = plays with fumble==1; opp fumbles recovered = plays with fumble_lost==1
     def_stats = plays.groupby(["season", "week", "game_id", "defteam"]).agg(
+        def_fumbles_seen=("fumble", "sum"),
+        def_fumbles_recovered=("fumble_lost", "sum"),
         def_fumbles_forced=("fumble_forced", "sum"),
         def_interceptions=("interception", "sum"),
     ).reset_index().rename(columns={"defteam": "team"})
@@ -71,11 +74,12 @@ def parse_pbp_turnovers(pbp_df: pd.DataFrame) -> pd.DataFrame:
     # Merge offensive and defensive turnovers
     merged = pd.merge(off_stats, def_stats, on=["season", "week", "game_id", "team"], how="outer").fillna(0.0)
 
-    # Derived single-game luck metrics
-    # Offense recovered = fumbles - fumbles_lost
+    # Derived single-game luck metrics: full team (offense + defense)
     merged["off_fumbles_recovered"] = merged["off_fumbles"] - merged["off_fumbles_lost"]
+    merged["total_fumbles_seen"] = merged["off_fumbles"] + merged["def_fumbles_seen"]
+    merged["total_fumbles_recovered"] = merged["off_fumbles_recovered"] + merged["def_fumbles_recovered"]
     merged["total_turnovers_committed"] = merged["off_fumbles_lost"] + merged["interceptions_thrown"]
-    merged["total_takeaways"] = merged["def_interceptions"]  # fumbles recovered by def is tracked via opponent
+    merged["total_takeaways"] = merged["def_interceptions"] + merged["def_fumbles_recovered"]
 
     return merged.sort_values(["season", "week", "game_id", "team"]).reset_index(drop=True)
 
@@ -127,25 +131,30 @@ def compute_rolling_turnover_luck(turnover_game_df: pd.DataFrame, window: int = 
                     "shrunk_recovery_rate": 0.50,
                     "expected_fumbles_lost": 0.0,
                     "net_fumble_luck": 0.0,
+                    "fumble_luck_per_gm": 0.0,
                     "net_luck_points": 0.0,
                 })
                 continue
 
             n_games = len(prior)
-            total_fumbles = int(prior["off_fumbles"].sum())
-            fumbles_lost = int(prior["off_fumbles_lost"].sum())
-            fumbles_recovered = int(prior["off_fumbles_recovered"].sum())
+            # Full-team (offense + defense) fumbles seen and recovered
+            if "total_fumbles_seen" in prior.columns:
+                total_fumbles = int(prior["total_fumbles_seen"].sum())
+                fumbles_recovered = int(prior["total_fumbles_recovered"].sum())
+            else:
+                total_fumbles = int(prior["off_fumbles"].sum())
+                fumbles_recovered = int(prior["off_fumbles_recovered"].sum())
+            fumbles_lost = total_fumbles - fumbles_recovered
 
-            # Expected fumbles lost based on 50% league prior
+            # Expected recoveries based on 50% league prior
             expected_fumbles_lost = total_fumbles * 0.50
-            expected_fumbles_recovered = total_fumbles * 0.50
-
-            # Net Fumble Luck: Positive means the team got lucky (recovered more than 50%)
-            # e.g., 6 fumbles, only 1 lost -> recovered 5, expected 3 -> Luck = +2.0 fumbles
-            net_fumble_luck = fumbles_recovered - expected_fumbles_recovered
 
             raw_rate = (fumbles_recovered / total_fumbles) if total_fumbles > 0 else 0.50
             shrunk_rate = shrink_turnover_rate(raw_rate, total_fumbles, prior=TURNOVER_PRIOR_RECOVERY_RATE, k=k)
+
+            # Net Fumble Luck regularized by empirical Bayes shrinkage
+            net_fumble_luck = (shrunk_rate - 0.50) * total_fumbles
+            fumble_luck_per_gm = net_fumble_luck / n_games if n_games > 0 else 0.0
 
             # Impact in scoring points (each lucky recovery prevents/gains ~3.8 points)
             net_luck_points = round(net_fumble_luck * POINTS_PER_TURNOVER_LUCK, 2)
@@ -163,10 +172,29 @@ def compute_rolling_turnover_luck(turnover_game_df: pd.DataFrame, window: int = 
                 "shrunk_recovery_rate": round(shrunk_rate, 3),
                 "expected_fumbles_lost": round(expected_fumbles_lost, 2),
                 "net_fumble_luck": round(net_fumble_luck, 2),
+                "fumble_luck_per_gm": round(fumble_luck_per_gm, 3),
                 "net_luck_points": net_luck_points,
             })
 
     return pd.DataFrame(records)
+
+
+def get_matchup_turnover_features(turnover_snapshot, home_team, away_team):
+    """
+    Computes net turnover luck differential between Home and Away over rolling window.
+    diff_fumble_luck_per_gm = Home net lucky recoveries/gm - Away net lucky recoveries/gm
+    Positive diff means Home has been luckier than Away (fade Home / regress toward Away).
+    """
+    h = turnover_snapshot.get(home_team, {})
+    a = turnover_snapshot.get(away_team, {})
+    h_luck_gm = h.get("fumble_luck_per_gm", 0.0)
+    a_luck_gm = a.get("fumble_luck_per_gm", 0.0)
+    diff_fumble_luck = h_luck_gm - a_luck_gm
+    return {
+        "home_fumble_luck_per_gm": round(float(h_luck_gm), 4),
+        "away_fumble_luck_per_gm": round(float(a_luck_gm), 4),
+        "diff_fumble_luck_per_gm": round(float(diff_fumble_luck), 4),
+    }
 
 
 def estimate_turnover_spread_adjustment(home_luck_points: float, away_luck_points: float, regression_factor: float = 0.50) -> float:

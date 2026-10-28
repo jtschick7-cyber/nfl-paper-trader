@@ -25,7 +25,13 @@ from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_featu
 from src.injury_guard import audit_candidate_pick
 from src.key_numbers import calculate_expected_value, calculate_spread_probabilities, payout_multiplier
 from src.model_utils import DIVISION_MAP, _load_sched
+from src.model_v2_core import fit_calibrator, calibrate_probability
 from src.odds_utils import american_to_implied_prob, remove_vig
+from src.train_model_v4 import (
+    V4_FEATURES,
+    compute_point_in_time_qb_shock,
+    compute_point_in_time_fumble_luck,
+)
 
 EPA_DATA_PATH = "data/team_game_epa.csv"
 
@@ -41,28 +47,38 @@ def update_elo(home_elo, away_elo, actual_margin):
     exp_home = 1.0 / (1.0 + 10.0 ** ((away_elo - h_adj) / 400.0))
     actual_home = 1.0 if actual_margin > 0 else (0.0 if actual_margin < 0 else 0.5)
     mov = abs(actual_margin)
-    mov_mult = np.log(max(mov, 1) + 1.0) * (2.2 / ((home_elo - away_elo) * 0.001 + 2.2))
+    elo_diff_winner = (h_adj - away_elo) if actual_margin >= 0 else (away_elo - h_adj)
+    mov_mult = np.log(max(mov, 1) + 1.0) * (2.2 / (elo_diff_winner * 0.001 + 2.2))
     shift = ELO_K * mov_mult * (actual_home - exp_home)
     return home_elo + shift, away_elo - shift
 
 
 def prepare_season_features(sched_df, epa_df):
-    """Compiles all game rows with both Raw Points and EPA features chronologically."""
+    """Compiles all game rows with Raw Points, EPA, QB Attribution, and Turnover features chronologically."""
     sched = sched_df.dropna(subset=["home_score", "away_score", "kickoff_utc"]).copy()
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True)
     sched = sched.sort_values("kickoff_utc").reset_index(drop=True)
+
+    qb_path = "data/team_game_qb.csv"
+    to_path = "data/team_game_turnovers.csv"
+    if not os.path.exists(qb_path) or not os.path.exists(to_path):
+        raise SystemExit("QB/Turnover data missing. Run: python -m src.build_features")
+    qb_df = pd.read_csv(qb_path)
+    turnover_df = pd.read_csv(to_path)
 
     elo_ratings = {}
     team_last_date = {}
     team_margins = {}
     team_pts_for = {}
     team_pts_against = {}
+    past_gids = []
 
     records = []
     current_season = None
 
     for _, game in sched.iterrows():
         season = int(game["season"])
+        gid = str(game["game_id"])
         home = str(game["home_team"]).upper().strip()
         away = str(game["away_team"]).upper().strip()
         kickoff = game["kickoff_utc"]
@@ -71,6 +87,7 @@ def prepare_season_features(sched_df, epa_df):
         actual_margin = home_score - away_score
 
         spread_line = float(game["spread_line"]) if pd.notna(game.get("spread_line")) else 0.0
+        total_line = float(game["total_line"]) if pd.notna(game.get("total_line")) else None
         home_odds = float(game["home_spread_odds"]) if pd.notna(game.get("home_spread_odds")) else -110.0
         away_odds = float(game["away_spread_odds"]) if pd.notna(game.get("away_spread_odds")) else -110.0
 
@@ -83,11 +100,12 @@ def prepare_season_features(sched_df, epa_df):
         a_elo = elo_ratings.get(away, ELO_INITIAL)
         elo_diff = (h_elo + ELO_HFA) - a_elo
 
-        # Rest days
+        # Rest days (Eastern calendar days)
+        local_day = kickoff.tz_convert("America/New_York").normalize()
         h_last = team_last_date.get(home)
         a_last = team_last_date.get(away)
-        h_rest = min((kickoff - h_last).days, 21) if h_last else 7
-        a_rest = min((kickoff - a_last).days, 21) if a_last else 7
+        h_rest = min((local_day - h_last).days, 21) if h_last else 7
+        a_rest = min((local_day - a_last).days, 21) if a_last else 7
         diff_rest = float(h_rest - a_rest)
 
         # Raw points rolling stats (last 4 games)
@@ -115,20 +133,29 @@ def prepare_season_features(sched_df, epa_df):
             diff_rush_epa = epa_matchup["diff_rush_epa"]
             diff_success = epa_matchup["diff_success_rate"]
             diff_early = epa_matchup.get("diff_early_down_epa", 0.0)
+            h_pass_epa = epa_snap.get(home, {}).get("roll_off_pass_epa", 0.0)
+            a_pass_epa = epa_snap.get(away, {}).get("roll_off_pass_epa", 0.0)
         else:
             diff_pass_epa = 0.0
             diff_rush_epa = 0.0
             diff_success = 0.0
             diff_early = 0.0
+            h_pass_epa = 0.0
+            a_pass_epa = 0.0
+
+        # Model v4 QB Shock & Turnover Luck
+        diff_qb_shock = compute_point_in_time_qb_shock(qb_df, past_gids, home, away, h_pass_epa, a_pass_epa, window=8)
+        diff_fumble_luck = compute_point_in_time_fumble_luck(turnover_df, past_gids, home, away, window=6)
 
         records.append({
-            "game_id": game["game_id"],
+            "game_id": gid,
             "season": season,
             "week": game["week"],
             "kickoff_utc": kickoff,
             "home_team": home,
             "away_team": away,
             "home_line": -spread_line,
+            "total_line": total_line,
             "home_odds": home_odds,
             "away_odds": away_odds,
             "actual_home_margin": actual_margin,
@@ -142,20 +169,23 @@ def prepare_season_features(sched_df, epa_df):
             "diff_rush_epa": diff_rush_epa,
             "diff_success_rate": diff_success,
             "diff_early_down_epa": diff_early,
+            "diff_qb_shock": diff_qb_shock,
+            "diff_fumble_luck_per_gm": diff_fumble_luck,
         })
 
         # Update historical state
         new_h, new_a = update_elo(h_elo, a_elo, actual_margin)
         elo_ratings[home] = new_h
         elo_ratings[away] = new_a
-        team_last_date[home] = kickoff
-        team_last_date[away] = kickoff
+        team_last_date[home] = local_day
+        team_last_date[away] = local_day
         team_pts_for.setdefault(home, []).append(home_score)
         team_pts_for.setdefault(away, []).append(away_score)
         team_pts_against.setdefault(home, []).append(away_score)
         team_pts_against.setdefault(away, []).append(home_score)
         team_margins.setdefault(home, []).append(actual_margin)
         team_margins.setdefault(away, []).append(-actual_margin)
+        past_gids.append(gid)
 
     return pd.DataFrame(records)
 
@@ -169,7 +199,7 @@ def run_walk_forward_backtest(test_seasons):
         raise SystemExit("Missing EPA data. Run: python -m src.build_features")
 
     epa_df = pd.read_csv(EPA_DATA_PATH)
-    all_seasons = sorted(list(set(test_seasons + [min(test_seasons) - 1])))
+    all_seasons = sorted(list(set(range(2020, max(test_seasons) + 1))))
     sched_df = _load_sched(all_seasons)
 
     print("Building full timeline dataset...")
@@ -182,6 +212,7 @@ def run_walk_forward_backtest(test_seasons):
     raw_features = ["diff_pf", "diff_pa", "diff_margin", "diff_rest", "division"]
 
     # Results tracking
+    bets_v4 = []
     bets_v3 = []
     bets_raw = []
     bets_fav = []
@@ -194,31 +225,97 @@ def run_walk_forward_backtest(test_seasons):
         if train_df.empty or test_df.empty:
             continue
 
+        raw_X_tr_v3 = train_df[v3_features].values
+        y_tr = train_df["actual_home_margin"].values
+
         # Fit v3 EPA Model
         scaler_v3 = StandardScaler()
-        X_tr_v3 = scaler_v3.fit_transform(train_df[v3_features].values)
-        y_tr = train_df["actual_home_margin"].values
+        X_tr_v3 = scaler_v3.fit_transform(raw_X_tr_v3)
 
         model_v3 = Ridge(alpha=15.0)
         model_v3.fit(X_tr_v3, y_tr)
         sigma_v3 = float(np.std(y_tr - model_v3.predict(X_tr_v3)))
 
-        # Fit Platt Calibrator on training fold to prevent overconfidence
-        y_tr_pred = model_v3.predict(X_tr_v3)
-        cal_X = []
-        cal_y = []
-        for j, (_, row) in enumerate(train_df.iterrows()):
-            act_diff = row["actual_home_margin"] + row["home_line"]
-            if abs(act_diff) > 1e-5:
-                sp = calculate_spread_probabilities(y_tr_pred[j], sigma_v3, row["home_line"])
-                cal_X.append([sp["cond_home_win"]])
-                cal_y.append(1 if act_diff > 0 else 0)
+        # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator on training fold
+        calibrator_v3 = ("identity", None)
+        if len(train_df) >= 50:
+            from sklearn.model_selection import TimeSeriesSplit
+            tscv = TimeSeriesSplit(n_splits=min(5, len(train_df)))
+            evidence_rows = []
+            for tr_idx, vl_idx in tscv.split(train_df):
+                X_tr_f_raw = raw_X_tr_v3[tr_idx]
+                y_tr_f = y_tr[tr_idx]
+                X_vl_f_raw = raw_X_tr_v3[vl_idx]
+                val_df = train_df.iloc[vl_idx]
 
-        calibrator_v3 = LogisticRegression()
-        has_calibrator = False
-        if len(cal_X) >= 50:
-            calibrator_v3.fit(cal_X, cal_y)
-            has_calibrator = True
+                sc_f = StandardScaler().fit(X_tr_f_raw)
+                rd_f = Ridge(alpha=15.0).fit(sc_f.transform(X_tr_f_raw), y_tr_f)
+                res_f = y_tr_f - rd_f.predict(sc_f.transform(X_tr_f_raw))
+                sig_f = float(np.std(res_f)) if len(res_f) > 1 else 13.4
+                mu_vl = rd_f.predict(sc_f.transform(X_vl_f_raw))
+
+                for j, (_, row) in enumerate(val_df.iterrows()):
+                    home_line = float(row["home_line"])
+                    act_margin = float(row["actual_home_margin"])
+                    diff = act_margin + home_line
+                    push = abs(diff) < 1e-5
+                    home_win = diff > 0
+                    away_win = diff < 0
+                    sp = calculate_spread_probabilities(mu_vl[j], sig_f, home_line)
+                    p_h = float(sp["cond_home_win"])
+                    p_a = 1.0 - p_h
+                    evidence_rows.append({
+                        "p_raw": p_h, "actual_win": bool(home_win), "push": bool(push), "weight": 0.5,
+                    })
+                    evidence_rows.append({
+                        "p_raw": p_a, "actual_win": bool(away_win), "push": bool(push), "weight": 0.5,
+                    })
+            calibrator_v3 = fit_calibrator(pd.DataFrame(evidence_rows))
+
+        # Fit v4 EPA + QB + Fumble Luck Model
+        raw_X_tr_v4 = train_df[V4_FEATURES].values
+        scaler_v4 = StandardScaler()
+        X_tr_v4 = scaler_v4.fit_transform(raw_X_tr_v4)
+        model_v4 = Ridge(alpha=15.0)
+        model_v4.fit(X_tr_v4, y_tr)
+        sigma_v4 = float(np.std(y_tr - model_v4.predict(X_tr_v4)))
+
+        # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator on training fold for v4
+        calibrator_v4 = ("identity", None)
+        if len(train_df) >= 50:
+            from sklearn.model_selection import TimeSeriesSplit
+            tscv_v4 = TimeSeriesSplit(n_splits=min(5, len(train_df)))
+            evidence_rows_v4 = []
+            for tr_idx, vl_idx in tscv_v4.split(train_df):
+                X_tr_f_raw = raw_X_tr_v4[tr_idx]
+                y_tr_f = y_tr[tr_idx]
+                X_vl_f_raw = raw_X_tr_v4[vl_idx]
+                val_df = train_df.iloc[vl_idx]
+
+                sc_f = StandardScaler().fit(X_tr_f_raw)
+                rd_f = Ridge(alpha=15.0).fit(sc_f.transform(X_tr_f_raw), y_tr_f)
+                res_f = y_tr_f - rd_f.predict(sc_f.transform(X_tr_f_raw))
+                sig_f = float(np.std(res_f)) if len(res_f) > 1 else 13.4
+                mu_vl = rd_f.predict(sc_f.transform(X_vl_f_raw))
+
+                for j, (_, row) in enumerate(val_df.iterrows()):
+                    home_line = float(row["home_line"])
+                    tot_line = float(row["total_line"]) if pd.notna(row.get("total_line")) else None
+                    act_margin = float(row["actual_home_margin"])
+                    diff = act_margin + home_line
+                    push = abs(diff) < 1e-5
+                    home_win = diff > 0
+                    away_win = diff < 0
+                    sp = calculate_spread_probabilities(mu_vl[j], sig_f, home_line, total_line=tot_line)
+                    p_h = float(sp["cond_home_win"])
+                    p_a = 1.0 - p_h
+                    evidence_rows_v4.append({
+                        "p_raw": p_h, "actual_win": bool(home_win), "push": bool(push), "weight": 0.5,
+                    })
+                    evidence_rows_v4.append({
+                        "p_raw": p_a, "actual_win": bool(away_win), "push": bool(push), "weight": 0.5,
+                    })
+            calibrator_v4 = fit_calibrator(pd.DataFrame(evidence_rows_v4))
 
         # Fit Raw Points Model
         scaler_raw = StandardScaler()
@@ -230,6 +327,9 @@ def run_walk_forward_backtest(test_seasons):
         # Evaluate on Test Games
         X_te_v3 = scaler_v3.transform(test_df[v3_features].values)
         mu_te_v3 = model_v3.predict(X_te_v3)
+
+        X_te_v4 = scaler_v4.transform(test_df[V4_FEATURES].values)
+        mu_te_v4 = model_v4.predict(X_te_v4)
 
         X_te_raw = scaler_raw.transform(test_df[raw_features].values)
         mu_te_raw = model_raw.predict(X_te_raw)
@@ -300,12 +400,8 @@ def run_walk_forward_backtest(test_seasons):
             prob_dict = calculate_spread_probabilities(mu_v3, sigma_v3, home_line)
             raw_p_h = prob_dict["cond_home_win"]
 
-            if has_calibrator:
-                p_h_v3 = float(calibrator_v3.predict_proba([[raw_p_h]])[0][1])
-                p_a_v3 = 1.0 - p_h_v3
-            else:
-                p_h_v3 = raw_p_h
-                p_a_v3 = prob_dict["cond_away_win"]
+            p_h_v3 = float(calibrate_probability(calibrator_v3, raw_p_h))
+            p_a_v3 = 1.0 - p_h_v3
 
             edge_h_v3 = p_h_v3 - fair_h
             edge_a_v3 = p_a_v3 - fair_a
@@ -344,6 +440,51 @@ def run_walk_forward_backtest(test_seasons):
                     v3_res, v3_pnl = "LOSS", -1.0
                 bets_v3.append({"season": test_s, "res": v3_res, "pnl": v3_pnl, "edge": v3_edge})
 
+            # --- 4. Evaluate v4 Feature Matrix (EPA + QB + Fumble Luck + Totals Sigma) ---
+            mu_v4 = mu_te_v4[i]
+            tot_line_g = float(game["total_line"]) if pd.notna(game.get("total_line")) else None
+            prob_dict_v4 = calculate_spread_probabilities(mu_v4, sigma_v4, home_line, total_line=tot_line_g)
+            raw_p_h_v4 = prob_dict_v4["cond_home_win"]
+
+            p_h_v4 = float(calibrate_probability(calibrator_v4, raw_p_h_v4))
+            p_a_v4 = 1.0 - p_h_v4
+
+            edge_h_v4 = p_h_v4 - fair_h
+            edge_a_v4 = p_a_v4 - fair_a
+
+            if edge_h_v4 >= edge_a_v4:
+                v4_side = "HOME"
+                v4_edge = edge_h_v4
+                v4_odds = home_odds
+                v4_line = home_line
+                pick_t_v4 = home
+            else:
+                v4_side = "AWAY"
+                v4_edge = edge_a_v4
+                v4_odds = away_odds
+                v4_line = -home_line
+                pick_t_v4 = away
+
+            alert_v4 = audit_candidate_pick(
+                pick_team=pick_t_v4,
+                pick_side=v4_side,
+                open_line=home_line,
+                current_line=home_line,
+                mu_home_margin=mu_v4,
+                edge=v4_edge,
+                max_auto_edge=MAX_AUTO_EDGE,
+            )
+
+            if MIN_EDGE_THRESHOLD <= v4_edge <= MAX_AUTO_EDGE and alert_v4.recommendation == "PROCEED":
+                diff_v4 = actual_margin + home_line if v4_side == "HOME" else -actual_margin + v4_line
+                if abs(diff_v4) < 1e-5:
+                    v4_res, v4_pnl = "PUSH", 0.0
+                elif diff_v4 > 0:
+                    v4_res, v4_pnl = "WIN", payout_multiplier(v4_odds)
+                else:
+                    v4_res, v4_pnl = "LOSS", -1.0
+                bets_v4.append({"season": test_s, "res": v4_res, "pnl": v4_pnl, "edge": v4_edge})
+
     def print_summary(name, bets, min_edge=None):
         if not bets:
             print(f"  {name:30s}: 0 bets placed.")
@@ -374,6 +515,8 @@ def run_walk_forward_backtest(test_seasons):
     print_summary("Raw Points (v1 Baseline)", bets_raw)
     print_summary("EPA-Enhanced (v3 Calibrated)", bets_v3)
     print_summary("EPA-Enhanced High-Conviction", bets_v3, min_edge=0.035)
+    print_summary("Model v4 (EPA+QB+Luck+Totals)", bets_v4)
+    print_summary("Model v4 High-Conviction", bets_v4, min_edge=0.035)
     print("=============================================================\n")
 
 

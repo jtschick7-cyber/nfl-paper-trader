@@ -1,8 +1,6 @@
 name: V2 Shadow Logger
 
 on:
-  schedule:
-    - cron: "30 15,18,23 * * 2"
   workflow_dispatch:
 
 permissions:
@@ -30,6 +28,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"
 
       - name: Install dependencies
         run: |

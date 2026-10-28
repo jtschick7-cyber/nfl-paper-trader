@@ -90,17 +90,16 @@ def discrete_margin_probabilities(mu, sigma=13.4, max_margin=50):
     m in [-max_margin, max_margin] by blending Gaussian prior with empirical
     football scoring key-number weights.
     
+    Applies an iterative mean-correction shift delta so that the discrete
+    expectation sum(m * P(M = m)) matches the input mu to within 1e-5 points.
+    
     Returns a dictionary: {margin: probability}
     """
     margins = np.arange(-max_margin, max_margin + 1)
+    mu_target = float(mu)
     
-    # 1. Base Gaussian probability mass for each integer margin [m - 0.5, m + 0.5]
-    upper = np.array([standard_normal_cdf((m + 0.5 - mu) / sigma) for m in margins])
-    lower = np.array([standard_normal_cdf((m - 0.5 - mu) / sigma) for m in margins])
-    raw_mass = upper - lower
-    
-    # 2. Key-number adjustment weights:
-    # We apply a slight boost to margins matching empirical football score spikes
+    # 1. Key-number adjustment weights:
+    # We apply a boost to margins matching empirical football score spikes
     # while preserving the expected value mu.
     weights = np.ones_like(margins, dtype=float)
     
@@ -110,21 +109,57 @@ def discrete_margin_probabilities(mu, sigma=13.4, max_margin=50):
             emp_freq = MARGIN_FREQUENCIES[abs_m]
             gauss_freq = standard_normal_cdf((abs_m + 0.5) / sigma) - standard_normal_cdf((abs_m - 0.5) / sigma)
             if gauss_freq > 0:
-                ratio = emp_freq / (2.0 * gauss_freq)
-                dampened = np.clip(ratio, 0.7, 1.6)
-                weights[idx] = dampened
-                
-    adjusted_mass = raw_mass * weights
-    total = np.sum(adjusted_mass)
-    if total > 0:
-        adjusted_mass /= total
-        
+                if abs_m == 0:
+                    weights[idx] = emp_freq / gauss_freq
+                else:
+                    ratio = emp_freq / (2.0 * gauss_freq)
+                    dampened = np.clip(ratio, 0.7, 1.6)
+                    weights[idx] = dampened
+
+    # 2. Iterative mean-correction to prevent mean-shift distortion
+    mu_shift = mu_target
+    adjusted_mass = None
+
+    for _ in range(5):
+        upper = np.array([standard_normal_cdf((m + 0.5 - mu_shift) / sigma) for m in margins])
+        lower = np.array([standard_normal_cdf((m - 0.5 - mu_shift) / sigma) for m in margins])
+        raw_mass = upper - lower
+        adjusted_mass = raw_mass * weights
+        total = np.sum(adjusted_mass)
+        if total > 0:
+            adjusted_mass /= total
+        exp_m = float(np.sum(margins * adjusted_mass))
+        err = exp_m - mu_target
+        if abs(err) < 1e-5:
+            break
+        mu_shift -= err
+
     return dict(zip(margins, adjusted_mass))
 
 
-def calculate_spread_probabilities(mu, sigma, home_spread):
+def calculate_totals_conditioned_sigma(base_sigma: float, total_line: float = None) -> float:
+    """
+    Scales game-level margin standard deviation sigma based on expected total points:
+        sigma_i = base_sigma * sqrt(clamp(total_line, 34.0, 58.0) / 44.5)
+    In low-scoring games (e.g. Total = 37.0), variance is compressed,
+    amplifying the probability of key numbers 3 and 7. In shootouts (Total = 54.0), variance expands.
+    """
+    if total_line is None:
+        return float(base_sigma)
+    try:
+        tot = float(total_line)
+        if not math.isfinite(tot):
+            return float(base_sigma)
+        tot_clamped = min(max(tot, 34.0), 58.0)
+        return float(base_sigma * math.sqrt(tot_clamped / 44.5))
+    except Exception:
+        return float(base_sigma)
+
+
+def calculate_spread_probabilities(mu, sigma, home_spread, total_line=None):
     """
     Calculates P(Home Win), P(Away Win), and P(Push) for a given home spread.
+    Supports optional total_line for totals-conditioned variance scaling sigma_i.
     
     Home covers if (margin + home_spread) > 0  => margin > -home_spread
     Push occurs if (margin + home_spread) == 0 => margin == -home_spread
@@ -138,7 +173,8 @@ def calculate_spread_probabilities(mu, sigma, home_spread):
         cond_away_win: float (p_away_win / (p_home_win + p_away_win))
     """
     home_spread = float(home_spread)
-    dist = discrete_margin_probabilities(mu, sigma)
+    effective_sigma = calculate_totals_conditioned_sigma(sigma, total_line)
+    dist = discrete_margin_probabilities(mu, effective_sigma)
     
     push_margin = -home_spread
     is_int = is_integer_spread(home_spread)
@@ -170,6 +206,7 @@ def calculate_spread_probabilities(mu, sigma, home_spread):
         "p_push": p_push,
         "cond_home_win": cond_home_win,
         "cond_away_win": cond_away_win,
+        "sigma": float(effective_sigma),
     }
 
 
