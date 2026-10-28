@@ -251,7 +251,24 @@ def parse_spreads(api_data):
             consensus_fair_h /= tot_c
             consensus_fair_a /= tot_c
 
+        # Totals: prefer target book, else any book offering a totals market
+        total_point = None
+        for b in [target_book] + [x for x in all_books if x is not target_book]:
+            t_mkt = next((m for m in b.get("markets", []) if m.get("key") == "totals"), None)
+            if not t_mkt:
+                continue
+            for o in t_mkt.get("outcomes", []):
+                try:
+                    if o.get("point") is not None:
+                        total_point = float(o["point"])
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if total_point is not None:
+                break
+
         results.append({
+            "total_line": total_point,
             "game_id": game_id,
             "commence_time": commence_time,
             "home_team": home_team,
@@ -335,3 +352,53 @@ def get_cached_live_home_spread(home_team: str, away_team: str):
         pass
 
     return None
+
+
+def get_cached_consensus_market(home_team: str, away_team: str):
+    """
+    Returns the parse_spreads() row (dict) for the given matchup from the cached
+    odds file (consensus fair probs, best lines/books, total_line), or None.
+    """
+    if not os.path.exists(ODDS_CACHE_FILE):
+        return None
+    try:
+        with open(ODDS_CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return None
+        df = parse_spreads(data)
+        if df is None or df.empty:
+            return None
+        h = team_to_abbr(home_team)
+        a = team_to_abbr(away_team)
+        for _, r in df.iterrows():
+            if team_to_abbr(r["home_team"]) == h and team_to_abbr(r["away_team"]) == a:
+                return {k: (None if (not isinstance(v, (list, dict)) and pd.isna(v)) else v) for k, v in r.to_dict().items()}
+    except Exception:
+        return None
+    return None
+
+
+def best_line_note(mkt, side, line, odds):
+    """
+    Returns a notes string with the shopped best book/line/odds for `side`
+    ("HOME"/"AWAY") if it improves on the given line (home-perspective for HOME,
+    away-perspective for AWAY) or price; otherwise "".
+    """
+    if not mkt:
+        return ""
+    pfx = "best_home" if side == "HOME" else "best_away"
+    try:
+        b_line = float(mkt[f"{pfx}_line"])
+        b_odds = float(mkt[f"{pfx}_odds"])
+        b_book = mkt[f"{pfx}_book"]
+        ref_line = float(line)
+        improves = b_line > ref_line + 1e-4 or (
+            abs(b_line - ref_line) < 1e-4
+            and american_to_decimal_odds(b_odds) > american_to_decimal_odds(odds) + 1e-9
+        )
+        if improves:
+            return f"{pfx}_book={b_book}; {pfx}_line={b_line:g}; {pfx}_odds={b_odds:g}"
+    except Exception:
+        pass
+    return ""

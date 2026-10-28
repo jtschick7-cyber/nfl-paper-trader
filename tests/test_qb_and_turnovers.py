@@ -152,3 +152,17 @@ def test_compute_point_in_time_qb_shock_starter_lookup():
     )
     # Willis (+0.05 vs 0.10) is worse than Love (+0.25 vs 0.10)
     assert diff_shock_love > diff_shock_default
+
+
+def test_fetch_pregame_starter_overrides_manual(tmp_path):
+    import json
+    from src.qb_features import fetch_pregame_starter_overrides
+
+    path = tmp_path / "qb_overrides.json"
+    path.write_text(json.dumps({"GB": "00-0036264", "kc": "Backup QB"}), encoding="utf-8")
+    res = fetch_pregame_starter_overrides(2026, qb_df=None, overrides_path=str(path))
+    assert res["GB"] == "00-0036264"
+    assert res["KC"] == "Backup QB"
+
+    missing = fetch_pregame_starter_overrides(2026, qb_df=None, overrides_path=str(tmp_path / "nope.json"))
+    assert missing == {}

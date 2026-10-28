@@ -4,7 +4,7 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
 SPORT_KEY = "americanfootball_nfl"
 REGIONS = "us"
-MARKETS = "spreads"
+MARKETS = os.getenv("MARKETS", "spreads,totals")
 
 PRIMARY_BOOK = "draftkings"
 FALLBACK_BOOK = "fanduel"

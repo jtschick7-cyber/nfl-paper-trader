@@ -310,6 +310,84 @@ def get_matchup_qb_comparison(qb_ratings_df: pd.DataFrame, home_team: str, away_
     }
 
 
+def fetch_pregame_starter_overrides(season: int = SEASON, qb_df: pd.DataFrame = None, overrides_path: str = "data/qb_overrides.json") -> dict:
+    """
+    Returns {team_abbr: qb_id_or_name} overrides for the upcoming game.
+    1. Manual overrides from `overrides_path` JSON (highest priority).
+    2. Automatic: if a team's most recent starter in `qb_df` is listed as Out/Doubtful
+       in the latest-week injury report, substitute the team's next QB (most prior dropbacks).
+    Never raises (offline/CI safe).
+    """
+    import json
+    import time
+
+    overrides = {}
+    manual = {}
+    try:
+        if overrides_path and os.path.exists(overrides_path):
+            with open(overrides_path, "r") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                manual = {str(k).upper().strip(): str(v) for k, v in loaded.items()}
+    except Exception:
+        manual = {}
+
+    try:
+        if qb_df is not None and not qb_df.empty:
+            cache_path = "data/nflverse_cache/injuries.csv"
+            inj = None
+            if os.path.exists(cache_path) and (time.time() - os.path.getmtime(cache_path)) < 6 * 3600:
+                inj = pd.read_csv(cache_path)
+            else:
+                import nfl_data_py as nfl
+                inj = nfl.import_injuries([season])
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                inj.to_csv(cache_path, index=False)
+
+            if inj is not None and not inj.empty and "report_status" in inj.columns:
+                inj = inj[inj["position"] == "QB"] if "position" in inj.columns else inj
+                if "week" in inj.columns and not inj.empty:
+                    inj = inj[inj["week"] == inj["week"].max()]
+                out = inj[inj["report_status"].isin(["Out", "Doubtful"])]
+
+                cur = qb_df[qb_df["season"] == season] if "season" in qb_df.columns else qb_df
+                for team, t_rows in cur.groupby("posteam"):
+                    t_rows = t_rows.sort_values(["season", "week", "game_id"])
+                    last_gid = t_rows["game_id"].iloc[-1]
+                    last_qbs = t_rows[t_rows["game_id"] == last_gid].sort_values("dropbacks", ascending=False)
+                    starter = last_qbs.iloc[0]
+                    t_out = out[out["team"] == team] if "team" in out.columns else out.iloc[0:0]
+                    if t_out.empty:
+                        continue
+                    s_id = str(starter.get("qb_id"))
+                    s_last = str(starter.get("qb_name", "")).split(".")[-1].split(" ")[-1].lower()
+                    ruled_out = False
+                    if "gsis_id" in t_out.columns and s_id in set(t_out["gsis_id"].astype(str)):
+                        ruled_out = True
+                    elif "full_name" in t_out.columns and s_last and any(
+                        str(n).lower().endswith(s_last) for n in t_out["full_name"]
+                    ):
+                        ruled_out = True
+                    if not ruled_out:
+                        continue
+                    out_names = set(t_out["gsis_id"].astype(str)) if "gsis_id" in t_out.columns else set()
+                    totals = (
+                        t_rows[t_rows["qb_id"].astype(str) != s_id]
+                        .groupby(["qb_id", "qb_name"])["dropbacks"].sum()
+                        .sort_values(ascending=False)
+                    )
+                    for (b_id, b_name), _ in totals.items():
+                        if str(b_id) in out_names:
+                            continue
+                        overrides[team] = str(b_id) if b_id and str(b_id) != "UNKNOWN_ID" else str(b_name)
+                        break
+    except Exception:
+        pass
+
+    overrides.update(manual)
+    return overrides
+
+
 def main():
     print("=" * 70)
     print("Quarterback Dropback Attribution Engine (FreeMargin Port)")

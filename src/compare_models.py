@@ -103,7 +103,7 @@ def load_final_scores(season=SEASON):
         return {}
 
 
-def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None):
+def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None):
     """Grades a single spread bet and calculates realized CLV."""
     side = str(side).strip().upper()
     line = float(line)
@@ -127,6 +127,14 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         result = "PUSH"
         units = 0.0
 
+    k_stake = float(stake_units) if (stake_units is not None and float(stake_units) > 0) else FLAT_BET_SIZE
+    if result == "WIN":
+        k_pnl = profit_units(odds, k_stake)
+    elif result == "LOSS":
+        k_pnl = -k_stake
+    else:
+        k_pnl = 0.0
+
     clv_pts = None
     clv_beat = None
     if closing_pick_line is not None:
@@ -137,6 +145,8 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         "game_id": game_id,
         "result": result,
         "units": units,
+        "kelly_stake": round(k_stake, 2),
+        "kelly_units": round(k_pnl, 4),
         "clv_points": clv_pts,
         "clv_beat": clv_beat,
         "margin": margin,
@@ -156,6 +166,8 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
             "win_pct": 0.0,
             "units": 0.0,
             "roi_pct": 0.0,
+            "kelly_units": 0.0,
+            "kelly_roi_pct": 0.0,
             "clv_beat_pct": 0.0,
             "avg_clv": 0.0,
         }
@@ -169,6 +181,10 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
 
     total_units = sum(b["units"] for b in graded_bets)
     roi_pct = (total_units / (n_bets * FLAT_BET_SIZE) * 100.0) if n_bets > 0 else 0.0
+
+    kelly_units = round(sum(b.get("kelly_units", b["units"]) for b in graded_bets), 2)
+    total_k_staked = sum(b.get("kelly_stake", FLAT_BET_SIZE) for b in graded_bets)
+    kelly_roi_pct = round(kelly_units / total_k_staked * 100.0, 2) if total_k_staked > 0 else 0.0
 
     clv_evaluated = [b for b in graded_bets if b["clv_points"] is not None]
     if clv_evaluated:
@@ -187,6 +203,8 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "win_pct": round(win_pct, 1),
         "units": round(total_units, 2),
         "roi_pct": round(roi_pct, 2),
+        "kelly_units": kelly_units,
+        "kelly_roi_pct": kelly_roi_pct,
         "clv_beat_pct": round(clv_beat_pct, 1),
         "avg_clv": round(avg_clv, 2),
     }
@@ -322,6 +340,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    stake_units=safe_float(row.get("v4_stake_units")),
                 )
 
                 if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
@@ -536,14 +555,16 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
     print("        NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3 vs v4)       ")
     print("=" * 94)
 
-    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8}")
-    print("-" * 94)
+    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8} | {'Kelly U':<8} | {'Kelly ROI':<9}")
+    print("-" * 126)
 
     for row in summary_rows:
         u_str = f"{row['units']:+.2f}u" if row['bets'] > 0 else "0.00u"
         roi_str = f"{row['roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
         clv_str = f"{row['clv_beat_pct']:.1f}%" if row['bets'] > 0 else "0.0%"
-        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8}")
+        k_u_str = f"{row['kelly_units']:+.2f}u" if row['bets'] > 0 else "0.00u"
+        k_roi_str = f"{row['kelly_roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
+        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8} | {k_u_str:>8} | {k_roi_str:>9}")
 
     print("-" * 94)
     g_bets = guard_metrics['bets']
@@ -582,18 +603,18 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
     md_lines.append("## 🏈 NFL Multi-Model Performance Scorecard\n")
     md_lines.append(f"*Last updated: {datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*\n")
 
-    md_lines.append("| Model / Architecture | Bets | Record | Win % | Units PnL | ROI % | CLV Beat % |")
-    md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+    md_lines.append("| Model / Architecture | Bets | Record | Win % | Units PnL | ROI % | CLV Beat % | Kelly Units | Kelly ROI % |")
+    md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for r in summary_rows:
         u_str = f"**{r['units']:+.2f}u**" if r['bets'] > 0 else "0.00u"
         roi_str = f"**{r['roi_pct']:+.1f}%**" if r['bets'] > 0 else "0.0%"
-        md_lines.append(f"| {r['model']} | {r['bets']} | {r['record']} | {r['win_pct']:.1f}% | {u_str} | {roi_str} | {r['clv_beat_pct']:.1f}% |")
+        md_lines.append(f"| {r['model']} | {r['bets']} | {r['record']} | {r['win_pct']:.1f}% | {u_str} | {roi_str} | {r['clv_beat_pct']:.1f}% | {r['kelly_units']:+.2f}u | {r['kelly_roi_pct']:+.1f}% |")
 
     if guard_metrics['bets'] > 0:
         saved = -guard_metrics['units']
         saved_str = f"+{saved:.2f}u" if saved > 0 else "0.00u"
-        md_lines.append(f"| 🛡️ *Injury/RLM Suppressed (Saved)* | {guard_metrics['bets']} | {guard_metrics['record']} | - | Would PnL: {guard_metrics['units']:+.2f}u | Saved: **{saved_str}** | - |")
+        md_lines.append(f"| 🛡️ *Injury/RLM Suppressed (Saved)* | {guard_metrics['bets']} | {guard_metrics['record']} | - | Would PnL: {guard_metrics['units']:+.2f}u | Saved: **{saved_str}** | - | - | - |")
 
     md_lines.append("\n### 📋 Active Slate Head-to-Head Comparison\n")
     md_lines.append("| Matchup | Market Spread | v1 Baseline | v2 Elo/Rest | v3 EPA-Enhanced | v4 Full Matrix | Consensus |")
@@ -628,7 +649,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
 
     # Section 1: Summary Table
     rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", "", "", ""])
-    rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "Avg CLV Pts"])
+    rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "Avg CLV Pts", "Kelly Units", "Kelly ROI %"])
 
     for r in summary_rows:
         rows.append([
@@ -641,6 +662,8 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             f"{r['roi_pct']:+.1f}%",
             f"{r['clv_beat_pct']:.1f}%",
             f"{r['avg_clv']:+.2f}",
+            f"{r['kelly_units']:+.2f}u",
+            f"{r['kelly_roi_pct']:+.1f}%",
         ])
 
     # Guard Audit row
@@ -655,6 +678,8 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             "-",
             f"Would PnL: {guard_metrics['units']:+.2f}u",
             f"Saved: {saved:+.2f}u",
+            "-",
+            "-",
             "-",
             "-",
         ])
@@ -757,9 +782,9 @@ def build_mock_data():
 
     # V4_Shadow
     v4_rows = [
-        {"game_id": "2026_01_BAL_KC", "week": 1, "v4_decision": "SHADOW_PICK", "v4_best_team": "KC", "v4_best_side": "HOME", "v4_best_line": -3.0, "v4_best_odds": -110.0, "v4_edge": 0.032},
-        {"game_id": "2026_01_GB_PHI", "week": 1, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "PHI", "v4_best_side": "HOME", "v4_best_line": -2.5, "v4_best_odds": -105.0, "v4_edge": 0.041},
-        {"game_id": "2026_02_CIN_KC", "week": 2, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "CIN", "v4_best_side": "AWAY", "v4_best_line": 5.5, "v4_best_odds": -110.0, "v4_edge": 0.039},
+        {"game_id": "2026_01_BAL_KC", "week": 1, "v4_stake_units": 0.5, "v4_decision": "SHADOW_PICK", "v4_best_team": "KC", "v4_best_side": "HOME", "v4_best_line": -3.0, "v4_best_odds": -110.0, "v4_edge": 0.032},
+        {"game_id": "2026_01_GB_PHI", "week": 1, "v4_stake_units": 1.25, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "PHI", "v4_best_side": "HOME", "v4_best_line": -2.5, "v4_best_odds": -105.0, "v4_edge": 0.041},
+        {"game_id": "2026_02_CIN_KC", "week": 2, "v4_stake_units": 0.8, "v4_decision": "HIGH_CONVICTION", "v4_best_team": "CIN", "v4_best_side": "AWAY", "v4_best_line": 5.5, "v4_best_odds": -110.0, "v4_edge": 0.039},
         {"game_id": "2026_02_CHI_HOU", "week": 2, "v4_decision": "PASS", "v4_edge": 0.012},
         # Active Week 8
         {"game_id": "2026_08_CAR_GB", "week": 8, "matchup": "CAR @ GB", "home_team": "GB", "away_team": "CAR", "home_line": -3.0, "v4_decision": "SHADOW_PICK", "v4_best_team": "GB", "v4_best_side": "HOME", "v4_best_line": -3.0, "v4_best_odds": -105.0, "v4_edge": 0.0245, "kickoff_utc": "2026-11-01 18:00:00+00:00"},

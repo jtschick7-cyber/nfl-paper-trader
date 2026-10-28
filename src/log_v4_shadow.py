@@ -30,7 +30,13 @@ from src.injury_guard import audit_candidate_pick
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, calibrate_probability
-from src.odds_utils import american_to_implied_prob, get_cached_live_home_spread, remove_vig
+from src.odds_utils import (
+    american_to_implied_prob,
+    best_line_note,
+    get_cached_consensus_market,
+    get_cached_live_home_spread,
+    remove_vig,
+)
 from src.sheet_utils import get_sheet_as_df
 from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
@@ -223,6 +229,8 @@ def run_v4_shadow_evaluations():
     epa_df = pd.read_csv(EPA_DATA_PATH)
     qb_df = pd.read_csv(QB_DATA_PATH) if os.path.exists(QB_DATA_PATH) else None
     turnover_df = pd.read_csv(TURNOVER_DATA_PATH) if os.path.exists(TURNOVER_DATA_PATH) else None
+    from src.qb_features import fetch_pregame_starter_overrides
+    starter_overrides = fetch_pregame_starter_overrides(SEASON, qb_df=qb_df)
 
     has_creds = bool((GSHEET_CREDENTIALS or os.getenv("GSHEET_CREDENTIALS")) and (SPREADSHEET_ID or os.getenv("SPREADSHEET_ID")))
     if not has_creds:
@@ -323,6 +331,13 @@ def run_v4_shadow_evaluations():
                     except Exception:
                         pass
 
+        mkt = get_cached_consensus_market(home, away)
+        if total_line is None and mkt is not None and mkt.get("total_line") is not None:
+            try:
+                total_line = float(mkt["total_line"])
+            except Exception:
+                pass
+
         away_fallback = False
         try:
             away_odds = float(row.get("opening_away_odds"))
@@ -364,7 +379,7 @@ def run_v4_shadow_evaluations():
         elo_diff, diff_margin, diff_rest, past_gids = get_point_in_time_context(completed_sched, home, away, kickoff)
 
         # Model v4 QB Shock & Turnover Luck
-        diff_qb_shock = compute_point_in_time_qb_shock(qb_df, past_gids, home, away, h_pass_epa, a_pass_epa, window=8)
+        diff_qb_shock = compute_point_in_time_qb_shock(qb_df, past_gids, home, away, h_pass_epa, a_pass_epa, starter_overrides=starter_overrides, window=8)
         diff_fumble_luck = compute_point_in_time_fumble_luck(turnover_df, past_gids, home, away, window=6)
 
         feat_vals = {
@@ -397,6 +412,13 @@ def run_v4_shadow_evaluations():
         implied_h = american_to_implied_prob(home_odds)
         implied_a = american_to_implied_prob(away_odds)
         fair_h, fair_a = remove_vig(implied_h, implied_a)
+        if mkt is not None:
+            try:
+                if abs(float(mkt["home_spread"]) - home_line) < 1e-4:
+                    fair_h = float(mkt["consensus_fair_home"])
+                    fair_a = float(mkt["consensus_fair_away"])
+            except Exception:
+                pass
 
         edge_h = p_home_cal - fair_h
         edge_a = p_away_cal - fair_a
@@ -458,6 +480,11 @@ def run_v4_shadow_evaluations():
         else:
             v1_disagree = "N/A"
 
+        if best_side == "HOME":
+            shop_note = best_line_note(mkt, "HOME", home_line, home_odds)
+        else:
+            shop_note = best_line_note(mkt, "AWAY", -home_line, away_odds)
+
         logged_at = datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         matchup = f"{away} @ {home}"
         season_val = int(row.get("season", SEASON))
@@ -512,7 +539,10 @@ def run_v4_shadow_evaluations():
             v1_p_team if (v1_p_team and v1_p_team != "NAN") else "NONE",
             v1_disagree,
             alert.recommendation,
-            "; ".join(alert.flags) if alert.flags else "NONE",
+            "; ".join(
+                (list(alert.flags) if alert.flags else [])
+                + ([shop_note] if shop_note else [])
+            ) or "NONE",
         ]
 
         new_rows.append(row_data)

@@ -10,7 +10,7 @@ def main():
     updates = []
     next_col = len(headers) + 1
 
-    for name in ["opening_away_odds", "closing_away_odds"]:
+    for name in ["opening_away_odds", "closing_away_odds", "total_line"]:
         if name not in existing:
             updates.append({
                 "row": 1,
@@ -24,7 +24,7 @@ def main():
         batch_update_cells(ws, updates)
         print("Added " + str(len(updates)) + " header(s) to Master_Bets.")
     else:
-        print("Away odds headers already exist.")
+        print("Away odds and total_line headers already exist.")
 
     print("Current headers:")
     print(list(existing.keys()))

@@ -161,7 +161,7 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
 
         # Point-in-time EPA features
         if season in seasons:
-            epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
+            epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2, opponent_adjust=False)
             epa_matchup = get_matchup_epa_features(epa_snap, home, away)
 
             if epa_matchup is not None:

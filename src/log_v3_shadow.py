@@ -27,7 +27,13 @@ from src.injury_guard import audit_candidate_pick
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, calibrate_probability
-from src.odds_utils import american_to_implied_prob, get_cached_live_home_spread, remove_vig
+from src.odds_utils import (
+    american_to_implied_prob,
+    best_line_note,
+    get_cached_consensus_market,
+    get_cached_live_home_spread,
+    remove_vig,
+)
 from src.sheet_utils import get_sheet_as_df
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.v2_sheet_utils import get_or_create_worksheet
@@ -315,7 +321,7 @@ def main():
             continue
 
         # Point-in-time EPA features
-        epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
+        epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2, opponent_adjust=False)
         epa_matchup = get_matchup_epa_features(epa_snap, home, away)
 
         if epa_matchup:
@@ -371,6 +377,14 @@ def main():
             american_to_implied_prob(home_odds),
             american_to_implied_prob(away_odds),
         )
+        mkt = get_cached_consensus_market(home, away)
+        if mkt is not None:
+            try:
+                if abs(float(mkt["home_spread"]) - home_line) < 1e-4:
+                    fair_h = float(mkt["consensus_fair_home"])
+                    fair_a = float(mkt["consensus_fair_away"])
+            except Exception:
+                pass
 
         edge_home = p_home_cal - fair_h
         edge_away = p_away_cal - fair_a
@@ -446,6 +460,13 @@ def main():
             notes.append("away_odds_fallback=-110")
         if p_push > 0.02:
             notes.append(f"push_prob={round(p_push*100, 1)}%")
+        shop_note = (
+            best_line_note(mkt, "HOME", home_line, home_odds)
+            if best_side == "HOME"
+            else best_line_note(mkt, "AWAY", -home_line, away_odds)
+        )
+        if shop_note:
+            notes.append(shop_note)
 
         new_rows.append([
             clean(MODEL_VERSION),

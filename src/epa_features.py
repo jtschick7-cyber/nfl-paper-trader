@@ -134,7 +134,7 @@ def parse_pbp_to_game_epa(pbp_df):
     return merged
 
 
-def compute_rolling_epa_snapshot(game_epa_df, schedule_df, as_of_utc, window=6, min_periods=3):
+def compute_rolling_epa_snapshot(game_epa_df, schedule_df, as_of_utc, window=6, min_periods=3, opponent_adjust=True, opp_adjust_weight=0.35):
     """
     Computes a point-in-time rolling average EPA profile for each team
     strictly prior to as_of_utc. Zero future data leakage.
@@ -207,7 +207,33 @@ def compute_rolling_epa_snapshot(game_epa_df, schedule_df, as_of_utc, window=6, 
 
         snapshot[team] = team_stats
 
-    return snapshot
+    if not opponent_adjust or "opponent" not in past_games.columns:
+        return snapshot
+
+    # Pass 2: adjust each game's regressed value for opponent quality (pass-1 rolling metrics)
+    adj_off = ["off_pass_epa", "off_rush_epa", "off_total_epa", "off_early_down_epa"]
+    adj_def = ["def_pass_epa", "def_rush_epa", "def_total_epa", "def_early_down_epa"]
+    pass1 = snapshot
+    adjusted = {team: dict(stats) for team, stats in pass1.items()}
+
+    for team, g in past_games.groupby("team"):
+        if team not in pass1:
+            continue
+        recent = g.tail(window)
+        opps = recent["opponent"].values
+        for col in adj_off + adj_def:
+            if col not in recent.columns:
+                continue
+            opp_key = "roll_def_" + col[len("off_"):] if col.startswith("off_") else "roll_off_" + col[len("def_"):]
+            raw_vals = recent[col].fillna(0.0).values
+            vals = []
+            for v, s_, o in zip(raw_vals, recent["season"].values, opps):
+                v = 0.5 * v if int(s_) < target_season else v
+                opp_metric = pass1.get(o, {}).get(opp_key, 0.0)
+                vals.append(v - opp_adjust_weight * opp_metric)
+            adjusted[team][f"roll_{col}"] = float(np.mean(vals))
+
+    return adjusted
 
 
 def get_matchup_epa_features(snapshot, home_team, away_team):

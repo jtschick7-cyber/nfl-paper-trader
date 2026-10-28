@@ -64,7 +64,14 @@ def test_parse_spreads_multi_book():
                             {"name": "Green Bay Packers", "point": -3.0, "price": -105.0},
                             {"name": "Detroit Lions", "point": 3.0, "price": -115.0},
                         ],
-                    }
+                    },
+                    {
+                        "key": "totals",
+                        "outcomes": [
+                            {"name": "Over", "point": 47.5, "price": -110.0},
+                            {"name": "Under", "point": 47.5, "price": -110.0},
+                        ],
+                    },
                 ],
             },
             {
@@ -107,6 +114,7 @@ def test_parse_spreads_multi_book():
     assert p["best_home_line"] == -2.5
     # Best away line: +3.0 (from DraftKings / BetOnline) is better than +2.5
     assert p["best_away_line"] == 3.0
+    assert p["total_line"] == 47.5
 
 
 def test_get_cached_live_home_spread_and_priority(tmp_path, monkeypatch):
@@ -160,3 +168,48 @@ def test_get_cached_live_home_spread_and_priority(tmp_path, monkeypatch):
 
     # Non-existent game returns None
     assert get_cached_live_home_spread("KC", "BAL") is None
+
+
+def test_get_cached_consensus_market(tmp_path, monkeypatch):
+    import json
+    import src.odds_utils as ou
+
+    def book(key, hp, hpr, ap, apr, total=None):
+        markets = [{
+            "key": "spreads",
+            "outcomes": [
+                {"name": "Green Bay Packers", "point": hp, "price": hpr},
+                {"name": "Detroit Lions", "point": ap, "price": apr},
+            ],
+        }]
+        if total is not None:
+            markets.append({"key": "totals", "outcomes": [
+                {"name": "Over", "point": total, "price": -110.0},
+                {"name": "Under", "point": total, "price": -110.0},
+            ]})
+        return {"key": key, "markets": markets}
+
+    data = [{
+        "home_team": "Green Bay Packers",
+        "away_team": "Detroit Lions",
+        "bookmakers": [
+            book("draftkings", -3.0, -105.0, 3.0, -115.0, total=47.5),
+            book("fanduel", -2.5, -115.0, 2.5, -105.0),
+            book("betonlineag", -3.0, -110.0, 3.0, -110.0),
+        ],
+    }]
+    cache = tmp_path / "odds_latest.json"
+    cache.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(ou, "ODDS_CACHE_FILE", str(cache))
+
+    mkt = ou.get_cached_consensus_market("GB", "DET")
+    assert mkt is not None
+    assert pytest.approx(mkt["consensus_fair_home"] + mkt["consensus_fair_away"], 1e-4) == 1.0
+    assert mkt["best_home_line"] == -2.5
+    assert mkt["best_home_book"] == "fanduel" or mkt["best_home_book"]
+    assert mkt["best_away_line"] == 3.0
+    assert mkt["total_line"] == 47.5
+    assert ou.get_cached_consensus_market("KC", "DET") is None
+
+    cache.write_text("not json", encoding="utf-8")
+    assert ou.get_cached_consensus_market("GB", "DET") is None

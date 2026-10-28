@@ -113,6 +113,13 @@ def capture_opening():
                 "value": odds_row["away_odds"],
             })
 
+        if "total_line" in col and pd.notna(odds_row.get("total_line")):
+            updates.append({
+                "row": row_num,
+                "col": col["total_line"],
+                "value": odds_row["total_line"],
+            })
+
         updates.append({
             "row": row_num,
             "col": col["opening_captured_at"],

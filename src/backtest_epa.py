@@ -127,6 +127,9 @@ def prepare_season_features(sched_df, epa_df):
         # EPA features
         epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
         epa_matchup = get_matchup_epa_features(epa_snap, home, away)
+        # Model v3 uses the unadjusted rolling EPA snapshot; v4 uses the opponent-adjusted one
+        raw_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2, opponent_adjust=False)
+        raw_matchup = get_matchup_epa_features(raw_snap, home, away) or {}
 
         if epa_matchup:
             diff_pass_epa = epa_matchup["diff_pass_epa"]
@@ -169,6 +172,10 @@ def prepare_season_features(sched_df, epa_df):
             "diff_rush_epa": diff_rush_epa,
             "diff_success_rate": diff_success,
             "diff_early_down_epa": diff_early,
+            "v3_diff_pass_epa": raw_matchup.get("diff_pass_epa", 0.0),
+            "v3_diff_rush_epa": raw_matchup.get("diff_rush_epa", 0.0),
+            "v3_diff_success_rate": raw_matchup.get("diff_success_rate", 0.0),
+            "v3_diff_early_down_epa": raw_matchup.get("diff_early_down_epa", 0.0),
             "diff_qb_shock": diff_qb_shock,
             "diff_fumble_luck_per_gm": diff_fumble_luck,
         })
@@ -206,8 +213,8 @@ def run_walk_forward_backtest(test_seasons):
     full_df = prepare_season_features(sched_df, epa_df)
 
     v3_features = [
-        "elo_diff", "diff_pass_epa", "diff_rush_epa", "diff_success_rate",
-        "diff_early_down_epa", "diff_margin", "diff_rest", "division"
+        "elo_diff", "v3_diff_pass_epa", "v3_diff_rush_epa", "v3_diff_success_rate",
+        "v3_diff_early_down_epa", "diff_margin", "diff_rest", "division"
     ]
     raw_features = ["diff_pf", "diff_pa", "diff_margin", "diff_rest", "division"]
 
