@@ -21,6 +21,9 @@ def main():
             next_col += 1
 
     if updates:
+        needed_cols = max(u["col"] for u in updates)
+        if ws.col_count < needed_cols:
+            ws.add_cols(needed_cols - ws.col_count)
         batch_update_cells(ws, updates)
         print("Added " + str(len(updates)) + " header(s) to Master_Bets.")
     else:
