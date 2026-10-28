@@ -51,6 +51,9 @@ jobs:
       - name: Fetch schedule
         run: python -m src.fetch_schedule
 
+      - name: Ensure sheet columns
+        run: python -m src.ensure_away_odds_columns
+
       - name: Capture opening lines
         run: python -m src.capture_opening
 

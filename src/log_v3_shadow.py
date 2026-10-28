@@ -118,6 +118,18 @@ def has_pick(value):
     return s != "" and s.lower() != "nan"
 
 
+def _dedup_key(game_id, home_line, home_odds):
+    try:
+        hl = f"{float(home_line):.2f}"
+    except Exception:
+        hl = str(home_line).strip()
+    try:
+        ho = f"{float(home_odds):.1f}"
+    except Exception:
+        ho = str(home_odds).strip()
+    return (str(game_id).strip(), hl, ho)
+
+
 def ensure_headers(ws):
     try:
         first = ws.row_values(1)
@@ -266,10 +278,10 @@ def main():
     records = ws.get_all_records()
     existing_keys = set()
     for r in records:
-        key = (
-            str(r.get("game_id", "")).strip(),
-            str(r.get("home_line", "")).strip(),
-            str(r.get("home_odds", "")).strip(),
+        key = _dedup_key(
+            r.get("game_id", ""),
+            r.get("home_line", ""),
+            r.get("home_odds", ""),
         )
         existing_keys.add(key)
 
@@ -315,7 +327,7 @@ def main():
             away_odds = -110.0
             away_fallback = True
 
-        key = (game_id, str(home_line), str(home_odds))
+        key = _dedup_key(game_id, home_line, home_odds)
         if key in existing_keys:
             skipped_duplicate += 1
             continue

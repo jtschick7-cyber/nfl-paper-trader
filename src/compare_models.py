@@ -212,6 +212,13 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
 
 def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4)."""
+    if v2_df is not None and not v2_df.empty and "game_id" in v2_df.columns:
+        v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="last")
+    if v3_df is not None and not v3_df.empty and "game_id" in v3_df.columns:
+        v3_df = v3_df.drop_duplicates(subset=["game_id"], keep="last")
+    if v4_df is not None and not v4_df.empty and "game_id" in v4_df.columns:
+        v4_df = v4_df.drop_duplicates(subset=["game_id"], keep="last")
+
     closing_map = {}
     master_by_gid = {}
     if not master_df.empty:

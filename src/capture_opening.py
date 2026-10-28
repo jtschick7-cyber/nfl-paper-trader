@@ -67,19 +67,9 @@ def capture_opening():
 
     for idx, row in sheet_df.iterrows():
         status = str(row.get("status", "")).strip().upper()
-
-        if status != "PENDING":
-            continue
-
-        if not pd.isna(row.get("opening_line")):
-            continue
-
         kickoff = parse_kickoff(row.get("kickoff_time"))
 
-        if pd.isna(kickoff):
-            continue
-
-        if kickoff <= now_utc:
+        if pd.isna(kickoff) or kickoff <= now_utc:
             continue
 
         home = str(row.get("home_team", "")).strip().upper()
@@ -93,6 +83,21 @@ def capture_opening():
 
         odds_row = match.iloc[0]
         row_num = idx + 2
+
+        if status == "OPEN_CAPTURED":
+            if "total_line" in col and pd.isna(row.get("total_line")) and pd.notna(odds_row.get("total_line")):
+                updates.append({
+                    "row": row_num,
+                    "col": col["total_line"],
+                    "value": odds_row["total_line"],
+                })
+            continue
+
+        if status != "PENDING":
+            continue
+
+        if not pd.isna(row.get("opening_line")):
+            continue
 
         updates.append({
             "row": row_num,

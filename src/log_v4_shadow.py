@@ -108,15 +108,30 @@ HEADERS = [
 ]
 
 
+def _dedup_key(game_id, home_line, home_odds):
+    try:
+        hl = f"{float(home_line):.2f}"
+    except Exception:
+        hl = str(home_line).strip()
+    try:
+        ho = f"{float(home_odds):.1f}"
+    except Exception:
+        ho = str(home_odds).strip()
+    return (str(game_id).strip(), hl, ho)
+
+
 def ensure_headers(ws):
-    existing = ws.get_all_values()
-    if not existing:
-        ws.append_row(HEADERS)
+    if ws.col_count < len(HEADERS):
+        ws.resize(cols=len(HEADERS))
+    try:
+        first = ws.row_values(1)
+    except Exception:
+        first = []
+    if not first:
+        ws.update([HEADERS], "A1")
         return
-    current_headers = existing[0]
-    if current_headers != HEADERS:
-        ws.clear()
-        ws.append_row(HEADERS)
+    if first != HEADERS:
+        ws.update([HEADERS], "A1")
 
 
 def get_point_in_time_context(sched_completed, home_team, away_team, kickoff):
@@ -252,6 +267,7 @@ def run_v4_shadow_evaluations():
     # Connect to Google Sheets if credentials are present
     has_creds = bool(os.getenv("GSHEET_CREDENTIALS") and os.getenv("SPREADSHEET_ID"))
     ws = None
+    records = []
     existing_keys = set()
     if has_creds:
         try:
@@ -259,10 +275,10 @@ def run_v4_shadow_evaluations():
             ensure_headers(ws)
             records = ws.get_all_records()
             for r in records:
-                key = (
-                    str(r.get("game_id", "")).strip(),
-                    str(r.get("home_line", "")).strip(),
-                    str(r.get("home_odds", "")).strip(),
+                key = _dedup_key(
+                    r.get("game_id", ""),
+                    r.get("home_line", ""),
+                    r.get("home_odds", ""),
                 )
                 existing_keys.add(key)
         except Exception as exc:
@@ -273,10 +289,10 @@ def run_v4_shadow_evaluations():
         try:
             loc_df = pd.read_csv(LOCAL_CSV_PATH)
             for _, r in loc_df.iterrows():
-                key = (
-                    str(r.get("game_id", "")).strip(),
-                    str(r.get("home_line", "")).strip(),
-                    str(r.get("home_odds", "")).strip(),
+                key = _dedup_key(
+                    r.get("game_id", ""),
+                    r.get("home_line", ""),
+                    r.get("home_odds", ""),
                 )
                 existing_keys.add(key)
         except Exception:
@@ -348,7 +364,7 @@ def run_v4_shadow_evaluations():
             away_odds = -110.0
             away_fallback = True
 
-        key = (game_id, str(home_line), str(home_odds))
+        key = _dedup_key(game_id, home_line, home_odds)
         if key in existing_keys:
             skipped_duplicate += 1
             continue
@@ -546,6 +562,7 @@ def run_v4_shadow_evaluations():
         ]
 
         new_rows.append(row_data)
+        existing_keys.add(key)
         evaluated += 1
 
     print(f"Evaluated {evaluated} games (Skipped: {skipped_duplicate} duplicate, {skipped_past} past, {skipped_no_line} no-line).")
@@ -585,7 +602,12 @@ def run_v4_shadow_evaluations():
         # Save to Google Sheets if connected
         if ws is not None:
             try:
-                ws.append_rows(new_rows)
+                needed_rows = len(records) + len(new_rows) + 20
+                if ws.row_count < needed_rows:
+                    ws.resize(rows=needed_rows)
+                if ws.col_count < len(HEADERS):
+                    ws.resize(cols=len(HEADERS))
+                ws.append_rows(new_rows, value_input_option="USER_ENTERED")
                 print(f"Logged {len(new_rows)} rows to '{SHADOW_TAB}' tab in Google Sheets.")
             except Exception as exc:
                 print(f"Warning: Failed to append to Google Sheets tab {SHADOW_TAB}: {exc}")
