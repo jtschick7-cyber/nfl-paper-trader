@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 data/odds_cache/*.json
+data/odds_cache/snapshots/
 data/nflverse_cache/
 data/epa_cache/
 data/training.csv

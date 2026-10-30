@@ -20,6 +20,7 @@ jobs:
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
       SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       SEASON: "2026"
 
     steps:
@@ -32,10 +33,21 @@ jobs:
           python-version: "3.10"
           cache: "pip"
 
+      - name: Restore odds cache for closing catch-up
+        uses: actions/cache/restore@v4
+        with:
+          path: data/odds_cache
+          key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-odds-cache-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Catch up any missed pre-kickoff closing lines
+        run: python -m src.capture_closing
 
       - name: Update results
         run: python -m src.update_results

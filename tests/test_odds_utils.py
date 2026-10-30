@@ -213,3 +213,77 @@ def test_get_cached_consensus_market(tmp_path, monkeypatch):
 
     cache.write_text("not json", encoding="utf-8")
     assert ou.get_cached_consensus_market("GB", "DET") is None
+
+
+def test_find_cached_pregame_closing_spread_filters_inplay_and_stale(tmp_path):
+    import json
+    from src.odds_utils import find_cached_pregame_closing_spread
+
+    kickoff = "2026-10-30T00:15:00Z"
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+
+    def make_event(last_update, home_pt, home_price, away_price):
+        return [{
+            "id": "ab2865e9f2d4b012de8bc6fb6de11a7c",
+            "commence_time": kickoff,
+            "home_team": "Green Bay Packers",
+            "away_team": "Carolina Panthers",
+            "bookmakers": [{
+                "key": "draftkings",
+                "title": "DraftKings",
+                "last_update": last_update,
+                "markets": [{
+                    "key": "spreads",
+                    "last_update": last_update,
+                    "outcomes": [
+                        {"name": "Green Bay Packers", "point": home_pt, "price": home_price},
+                        {"name": "Carolina Panthers", "point": -home_pt, "price": away_price},
+                    ],
+                }],
+            }],
+        }]
+
+    # 1. Stale Monday opening snapshot (~79h pre-kickoff) -> MUST be rejected
+    (tmp_path / "odds_raw_2026-10-26.json").write_text(
+        json.dumps(make_event("2026-10-26T17:26:46Z", -3.5, -115.0, -105.0)),
+        encoding="utf-8",
+    )
+
+    # 2. Earlier Thursday afternoon snapshot (5h pre-kickoff)
+    (snaps / "odds_20261029T191500Z.json").write_text(
+        json.dumps(make_event("2026-10-29T19:15:00Z", -3.5, -110.0, -110.0)),
+        encoding="utf-8",
+    )
+
+    # 3. Freshest pre-kickoff snapshot (22:28:15Z, 1h47m pre-kickoff) -> MUST win
+    (tmp_path / "odds_raw_2026-10-29.json").write_text(
+        json.dumps(make_event("2026-10-29T22:28:15Z", -3.0, -105.0, -115.0)),
+        encoding="utf-8",
+    )
+
+    # 4. In-play 4th-quarter live snapshot (01:40Z, post-kickoff) -> MUST be rejected
+    (tmp_path / "odds_latest.json").write_text(
+        json.dumps(make_event("2026-10-30T01:40:00Z", -10.5, -110.0, -110.0)),
+        encoding="utf-8",
+    )
+
+    res = find_cached_pregame_closing_spread("GB", "CAR", kickoff, cache_dir=str(tmp_path))
+    assert res is not None
+    assert res["home_spread"] == -3.0
+    assert res["home_odds"] == -105.0
+    assert res["away_odds"] == -115.0
+    assert res["captured_at_utc"] == "2026-10-29T22:28:15+00:00"
+
+    # If ONLY stale Tuesday opening and post-kickoff in-play snapshots exist, returns None
+    only_invalid = tmp_path / "only_invalid"
+    only_invalid.mkdir()
+    (only_invalid / "odds_raw_2026-10-26.json").write_text(
+        json.dumps(make_event("2026-10-26T17:26:46Z", -3.5, -115.0, -105.0)),
+        encoding="utf-8",
+    )
+    (only_invalid / "odds_latest.json").write_text(
+        json.dumps(make_event("2026-10-30T01:40:00Z", -10.5, -110.0, -110.0)),
+        encoding="utf-8",
+    )
+    assert find_cached_pregame_closing_spread("GB", "CAR", kickoff, cache_dir=str(only_invalid)) is None

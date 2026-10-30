@@ -182,8 +182,11 @@ def get_sheet_as_df(ws=None) -> pd.DataFrame:
         "edge",
         "opening_line",
         "opening_odds",
+        "opening_away_odds",
         "closing_line",
         "closing_odds",
+        "closing_away_odds",
+        "total_line",
         "clv_points",
         "roi_units",
     ]

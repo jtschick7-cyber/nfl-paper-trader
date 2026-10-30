@@ -1,10 +1,11 @@
 import os
+import glob
 import json
 import time
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from src.config import (
     ODDS_API_KEY,
     SPORT_KEY,
@@ -15,6 +16,8 @@ from src.config import (
 )
 
 CACHE_DIR = "data/odds_cache"
+SNAPSHOTS_DIR = os.path.join(CACHE_DIR, "snapshots")
+SNAPSHOT_RETENTION_SECONDS = 72 * 3600
 os.makedirs(CACHE_DIR, exist_ok=True)
 ODDS_CACHE_FILE = os.path.join(CACHE_DIR, "odds_latest.json")
 
@@ -94,6 +97,28 @@ def choose_bookmaker(bookmakers):
     return bookmakers[0] if bookmakers else None
 
 
+def _save_timestamped_snapshot(data, cache_dir=None, retention_seconds=SNAPSHOT_RETENTION_SECONDS):
+    """Persists a timestamped snapshot so later same-day fetches do not overwrite pre-kickoff lines."""
+    base_dir = cache_dir or CACHE_DIR
+    snap_dir = os.path.join(base_dir, "snapshots")
+    try:
+        os.makedirs(snap_dir, exist_ok=True)
+        ts_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snap_path = os.path.join(snap_dir, f"odds_{ts_slug}.json")
+        with open(snap_path, "w") as f:
+            json.dump(data, f)
+
+        cutoff = time.time() - retention_seconds
+        for old_file in glob.glob(os.path.join(snap_dir, "odds_*.json")):
+            try:
+                if os.path.getmtime(old_file) < cutoff:
+                    os.remove(old_file)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def fetch_odds_api(max_age_seconds=12 * 3600, force_refresh=False):
     """
     Fetches raw JSON from Odds API with age-aware caching.
@@ -137,6 +162,7 @@ def fetch_odds_api(max_age_seconds=12 * 3600, force_refresh=False):
             json.dump(data, f)
         with open(dated_cache_file, "w") as f:
             json.dump(data, f)
+        _save_timestamped_snapshot(data, cache_dir=CACHE_DIR)
 
         remaining = response.headers.get("x-requests-remaining", "unknown")
         print(f"Remaining API requests: {remaining}")
@@ -271,6 +297,7 @@ def parse_spreads(api_data):
             "total_line": total_point,
             "game_id": game_id,
             "commence_time": commence_time,
+            "market_last_update": spreads_market.get("last_update") or target_book.get("last_update"),
             "home_team": home_team,
             "away_team": away_team,
             "home_spread": outcomes[raw_home]["point"],
@@ -402,3 +429,154 @@ def best_line_note(mkt, side, line, odds):
     except Exception:
         pass
     return ""
+
+
+def _snapshot_file_timestamp(fpath: str):
+    """Infers UTC timestamp from snapshot filename or falls back to file mtime."""
+    bname = os.path.basename(fpath)
+    if bname.startswith("odds_") and bname.endswith("Z.json"):
+        slug = bname[len("odds_"):-len(".json")]
+        try:
+            dt = datetime.strptime(slug, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            return pd.Timestamp(dt)
+        except ValueError:
+            pass
+    try:
+        return pd.Timestamp(os.path.getmtime(fpath), unit="s", tz="UTC")
+    except OSError:
+        return pd.NaT
+
+
+def find_cached_pregame_closing_spread(
+    home_team: str,
+    away_team: str,
+    kickoff_utc,
+    cache_dir: str = None,
+    max_pre_kickoff_hours: float = 18.0,
+):
+    """
+    Searches cached Odds API snapshots (snapshots/*.json, odds_latest.json, odds_raw_*.json)
+    for the freshest pre-kickoff spread for (home_team, away_team).
+
+    Strict invariants:
+    - Rejects any bookmaker market updated after kickoff_utc (prevents live in-game spread contamination).
+    - Rejects snapshots older than max_pre_kickoff_hours before kickoff_utc (prevents stale Tuesday
+      opening lines from being treated as closing lines).
+    - Selects the valid pre-kickoff snapshot closest to kickoff_utc using standard BOOK_PRIORITY.
+    """
+    kickoff_ts = pd.to_datetime(kickoff_utc, utc=True, errors="coerce")
+    if pd.isna(kickoff_ts):
+        return None
+
+    h = team_to_abbr(home_team)
+    a = team_to_abbr(away_team)
+    if not h or not a:
+        return None
+
+    base_dir = cache_dir or CACHE_DIR
+    if not os.path.isdir(base_dir):
+        return None
+
+    candidates = []
+    seen_paths = set()
+    patterns = [
+        os.path.join(base_dir, "snapshots", "odds_*.json"),
+        os.path.join(base_dir, "odds_latest.json"),
+        os.path.join(base_dir, "odds_raw_*.json"),
+    ]
+    file_list = []
+    for pat in patterns:
+        for p in sorted(glob.glob(pat)):
+            rp = os.path.abspath(p)
+            if rp not in seen_paths and os.path.isfile(p):
+                seen_paths.add(rp)
+                file_list.append(p)
+
+    max_window = (
+        timedelta(hours=float(max_pre_kickoff_hours))
+        if max_pre_kickoff_hours is not None
+        else None
+    )
+
+    for fpath in file_list:
+        try:
+            with open(fpath, "r") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        if not isinstance(data, list):
+            continue
+
+        file_ts = _snapshot_file_timestamp(fpath)
+
+        for event in data:
+            if not isinstance(event, dict):
+                continue
+            ev_h = team_to_abbr(event.get("home_team", ""))
+            ev_a = team_to_abbr(event.get("away_team", ""))
+            if ev_h != h or ev_a != a:
+                continue
+
+            comm_ts = pd.to_datetime(event.get("commence_time"), utc=True, errors="coerce")
+            if pd.notna(comm_ts) and abs(comm_ts - kickoff_ts) > timedelta(days=5):
+                continue
+
+            valid_books = []
+            book_lu = {}
+            for b in event.get("bookmakers", []):
+                s_mkt = next((m for m in b.get("markets", []) if m.get("key") == "spreads"), None)
+                if not s_mkt:
+                    continue
+
+                raw_lu = s_mkt.get("last_update") or b.get("last_update")
+                lu_ts = pd.to_datetime(raw_lu, utc=True, errors="coerce") if raw_lu else file_ts
+                if pd.isna(lu_ts):
+                    lu_ts = file_ts
+                if pd.isna(lu_ts):
+                    continue
+
+                # Must be strictly pre-kickoff (never allow in-play spreads)
+                if lu_ts > kickoff_ts:
+                    continue
+
+                # Must be within gameday closing window (never allow early-week opening lines)
+                if max_window is not None and (kickoff_ts - lu_ts) > max_window:
+                    continue
+
+                valid_books.append(b)
+                book_lu[id(b)] = lu_ts
+
+            if not valid_books:
+                continue
+
+            target_book = choose_bookmaker(valid_books)
+            if not target_book:
+                continue
+
+            target_ts = book_lu.get(id(target_book))
+            if target_ts is None or pd.isna(target_ts):
+                continue
+
+            filtered_event = dict(event)
+            filtered_event["bookmakers"] = valid_books
+            parsed_df = parse_spreads([filtered_event])
+            if parsed_df is None or parsed_df.empty:
+                continue
+
+            row_dict = {
+                k: (None if (not isinstance(v, (list, dict)) and pd.isna(v)) else v)
+                for k, v in parsed_df.iloc[0].to_dict().items()
+            }
+            row_dict["captured_at_utc"] = target_ts.isoformat()
+            row_dict["cache_source"] = os.path.basename(fpath)
+
+            b_key = target_book.get("key", "")
+            prio_rank = -BOOK_PRIORITY.index(b_key) if b_key in BOOK_PRIORITY else -len(BOOK_PRIORITY)
+            candidates.append(((target_ts, prio_rank), row_dict))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]

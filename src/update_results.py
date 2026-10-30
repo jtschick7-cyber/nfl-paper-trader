@@ -76,14 +76,35 @@ def update_results():
             continue
 
         status = str(row.get("status", "")).strip().upper()
-        if status in {"SETTLED", "RESULT_UPDATED", "ERROR"}:
+        row_num = idx + 2
+        home_team = str(row.get("home_team", "")).strip().upper()
+        away_team = str(row.get("away_team", "")).strip().upper()
+
+        # Self-heal CLV on already-settled bets whose closing_line was backfilled later
+        if status == "SETTLED":
+            closing_line = safe_float(row.get("closing_line"))
+            existing_clv = safe_float(row.get("clv_points"))
+            pick_line = safe_float(row.get("pick_line"))
+            if closing_line is not None and existing_clv is None and pick_line is not None:
+                pick_side = str(row.get("pick_side", "")).strip().upper()
+                pick_team = str(row.get("pick_team", "")).strip().upper()
+                if not pick_side and pick_team and pick_team != "NAN":
+                    pick_side = "HOME" if pick_team == home_team else "AWAY"
+                if pick_side in {"HOME", "AWAY"}:
+                    closing_pick_line = closing_line if pick_side == "HOME" else -closing_line
+                    clv_points = float(pick_line) - float(closing_pick_line)
+                    updates.append({"row": row_num, "col": col["clv_points"], "value": clv_points})
+                    updates.append({"row": row_num, "col": col["clv_flag"], "value": bool(clv_points > 0)})
+                    raw_notes = "" if pd.isna(row.get("notes")) else str(row.get("notes")).strip()
+                    cleaned_parts = [p.strip() for p in raw_notes.split(";") if p.strip() and p.strip() != "MISSING_CLOSING_LINE"]
+                    if raw_notes != "; ".join(cleaned_parts):
+                        updates.append({"row": row_num, "col": col["notes"], "value": "; ".join(cleaned_parts)})
+            continue
+
+        if status in {"RESULT_UPDATED", "ERROR"}:
             continue
 
         home_score, away_score = scores[game_id]
-        row_num = idx + 2
-
-        home_team = str(row.get("home_team", "")).strip().upper()
-        away_team = str(row.get("away_team", "")).strip().upper()
 
         result_text = home_team + " " + str(home_score) + ", " + away_team + " " + str(away_score)
         updates.append({"row": row_num, "col": col["game_result"], "value": result_text})
@@ -138,7 +159,16 @@ def update_results():
             clv_points = float(pick_line) - float(closing_pick_line)
             clv_flag = bool(clv_points > 0)
         else:
-            updates.append({"row": row_num, "col": col["notes"], "value": "MISSING_CLOSING_LINE"})
+            raw_notes = "" if pd.isna(row.get("notes")) else str(row.get("notes")).strip()
+            if raw_notes and raw_notes.lower() != "nan":
+                combined_notes = (
+                    raw_notes
+                    if "MISSING_CLOSING_LINE" in raw_notes
+                    else f"{raw_notes}; MISSING_CLOSING_LINE"
+                )
+            else:
+                combined_notes = "MISSING_CLOSING_LINE"
+            updates.append({"row": row_num, "col": col["notes"], "value": combined_notes})
 
         updates.append({"row": row_num, "col": col["pick_result"], "value": pick_result})
         updates.append({"row": row_num, "col": col["clv_points"], "value": clv_points})

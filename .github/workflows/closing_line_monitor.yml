@@ -2,11 +2,24 @@ name: Closing Line Monitor
 
 on:
   schedule:
-    # Every 5 minutes on Thu, Fri, Sat, Sun, Mon (UTC days 4,5,6,0,1)
-    - cron: "*/5 * * * 4,5,6,0,1"
-    # Early Tuesday for Monday Night Football (UTC hours 0-2)
-    - cron: "*/5 0-2 * * 2"
+    # Staggered off-peak 10-minute cadence across all NFL gameday & catch-up UTC windows
+    # (Avoids :00/:05/:15/:30 global runner spikes and dead overnight hours that trigger GH throttling)
+    - cron: "3,13,23,33,43,53 13-23 * * 4,5,6"
+    - cron: "3,13,23,33,43,53 9-23 * * 0"
+    - cron: "3,13,23,33,43,53 16-23 * * 1"
+    - cron: "3,13,23,33,43,53 0-5 * * 5,6,0,1,2"
   workflow_dispatch:
+    inputs:
+      run_backfill:
+        description: "Run verified closing-line backfill (src.backfill_closing)"
+        required: false
+        default: false
+        type: boolean
+      refresh_scorecard:
+        description: "Refresh multi-model scorecard (src.compare_models)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,7 +31,7 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -37,17 +50,50 @@ jobs:
           cache: "pip"
 
       - name: Restore odds cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/odds_cache
-          key: ${{ runner.os }}-odds-cache-${{ github.run_number }}
+          key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-odds-cache-
+
+      - name: Record pre-run cache fingerprint
+        id: cache_before
+        run: |
+          mkdir -p data/odds_cache
+          fp=$(find data/odds_cache -type f -print0 | sort -z | xargs -0 -r sha256sum 2>/dev/null | sha256sum | awk '{print $1}')
+          echo "hash=$fp" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run verified closing line backfill
+        if: ${{ inputs.run_backfill == true || inputs.run_backfill == 'true' }}
+        run: python -m src.backfill_closing
+
       - name: Capture closing lines
+        id: capture
         run: python -m src.capture_closing
+
+      - name: Check if odds cache changed
+        id: cache_after
+        run: |
+          fp=$(find data/odds_cache -type f -print0 | sort -z | xargs -0 -r sha256sum 2>/dev/null | sha256sum | awk '{print $1}')
+          if [ "$fp" != "${{ steps.cache_before.outputs.hash }}" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save odds cache
+        if: steps.cache_after.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: data/odds_cache
+          key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
+
+      - name: Refresh Model Scorecard
+        if: ${{ steps.capture.outputs.settled_backfilled == 'true' || inputs.refresh_scorecard == true || inputs.refresh_scorecard == 'true' || inputs.run_backfill == true || inputs.run_backfill == 'true' }}
+        run: python -m src.compare_models
