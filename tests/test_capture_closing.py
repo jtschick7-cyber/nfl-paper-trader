@@ -69,6 +69,15 @@ def test_row_needs_closing_two_tier_window():
     )
     assert not row_needs_closing(prime_captured_row, ko_ts - timedelta(minutes=10))
 
+    # If closing_line exists but closing_captured_at is missing, prime window upgrades once
+    unverified_row = dict(
+        base_row,
+        status="CLOSE_CAPTURED",
+        closing_line=-3.0,
+        closing_captured_at="",
+    )
+    assert row_needs_closing(unverified_row, ko_ts - timedelta(minutes=35))
+
 
 def test_row_needs_cache_catchup_includes_settled_and_result_updated():
     kickoff = "2026-10-30T00:15:00+00:00"

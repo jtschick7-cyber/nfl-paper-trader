@@ -4,10 +4,10 @@ on:
   schedule:
     # Staggered off-peak 10-minute cadence across all NFL gameday & catch-up UTC windows
     # (Avoids :00/:05/:15/:30 global runner spikes and dead overnight hours that trigger GH throttling)
-    - cron: "3,13,23,33,43,53 13-23 * * 4,5,6"
+    - cron: "3,13,23,33,43,53 13-23 * * 3,4,5,6"
     - cron: "3,13,23,33,43,53 9-23 * * 0"
     - cron: "3,13,23,33,43,53 16-23 * * 1"
-    - cron: "3,13,23,33,43,53 0-5 * * 5,6,0,1,2"
+    - cron: "3,13,23,33,43,53 0-5 * * 0,1,2,4,5,6"
   workflow_dispatch:
     inputs:
       run_backfill:

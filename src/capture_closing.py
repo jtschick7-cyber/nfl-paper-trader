@@ -121,10 +121,11 @@ def row_needs_closing(row, now_utc, attempts=None):
         return True
 
     # Already has a closing line: upgrade once if we are now in the prime window
-    # and the existing line was captured earlier than PRIME_CAPTURE_MAX_MINUTES pre-kickoff.
+    # and the existing line was captured earlier than PRIME_CAPTURE_MAX_MINUTES pre-kickoff
+    # (or if closing_captured_at is missing/blank).
     if delta <= prime_lead:
         captured_at = parse_kickoff(row.get("closing_captured_at"))
-        if not pd.isna(captured_at) and (kickoff - captured_at) > prime_lead:
+        if pd.isna(captured_at) or (kickoff - captured_at) > prime_lead:
             return True
 
     return False
