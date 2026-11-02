@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: nightly-results
+  # Shared by the Master_Bets writers: sheet writes address rows by index (idx + 2), so runs must not overlap.
+  group: sheet-writer
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: "pip"
 
       - name: Restore odds cache for closing catch-up

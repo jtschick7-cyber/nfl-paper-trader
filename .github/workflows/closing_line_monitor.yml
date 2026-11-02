@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+# The self-pacing loop stays alive for hours, so it keeps its own group instead of
+# `sheet-writer`: GitHub keeps only one pending run per group and cancels it when a
+# newer run queues, so the next closing cron would cancel a pending Tuesday or nightly
+# run parked behind the loop. Its writes are row-checked by game_id before landing
+# (see verify_row_game_ids), and the scorecard rewrite runs in a `sheet-writer` job.
 concurrency:
   group: closing-line-monitor
   cancel-in-progress: false
@@ -32,6 +37,10 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 345
+    permissions:
+      contents: write  # push raw odds snapshots to the odds-data branch
+    outputs:
+      settled_backfilled: ${{ steps.capture.outputs.settled_backfilled }}
 
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -46,7 +55,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: "pip"
 
       - name: Restore odds cache
@@ -79,6 +88,11 @@ jobs:
         id: capture
         run: python -m src.closing_loop
 
+      - name: Archive odds snapshots to odds-data branch
+        if: always()
+        continue-on-error: true
+        run: bash scripts/push_odds_snapshots.sh
+
       - name: Check if odds cache changed
         id: cache_after
         run: |
@@ -96,6 +110,34 @@ jobs:
           path: data/odds_cache
           key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
 
+  scorecard:
+    needs: monitor
+    if: ${{ needs.monitor.outputs.settled_backfilled == 'true' || inputs.refresh_scorecard == true || inputs.refresh_scorecard == 'true' || inputs.run_backfill == true || inputs.run_backfill == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: sheet-writer
+      cancel-in-progress: false
+
+    env:
+      GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      SEASON: "2026"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Refresh Model Scorecard
-        if: ${{ steps.capture.outputs.settled_backfilled == 'true' || inputs.refresh_scorecard == true || inputs.refresh_scorecard == 'true' || inputs.run_backfill == true || inputs.run_backfill == 'true' }}
         run: python -m src.compare_models

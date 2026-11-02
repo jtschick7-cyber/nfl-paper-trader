@@ -10,13 +10,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: tuesday-opening
+  # Shared by the Master_Bets writers: sheet writes address rows by index (idx + 2), so runs must not overlap.
+  group: sheet-writer
   cancel-in-progress: false
 
 jobs:
   capture:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write  # push raw odds snapshots to the odds-data branch
 
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -31,7 +34,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: "pip"
 
       - name: Restore odds cache
@@ -56,6 +59,10 @@ jobs:
 
       - name: Capture opening lines
         run: python -m src.capture_opening
+
+      - name: Archive odds snapshots to odds-data branch
+        continue-on-error: true
+        run: bash scripts/push_odds_snapshots.sh
 
       - name: Generate picks
         run: python -m src.generate_picks

@@ -186,6 +186,7 @@ def get_sheet_as_df(ws=None) -> pd.DataFrame:
         "closing_line",
         "closing_odds",
         "closing_away_odds",
+        "closing_consensus_line",
         "total_line",
         "clv_points",
         "roi_units",
@@ -327,3 +328,45 @@ def update_cell(game_id: str, column_name: str, value):
             }
         ],
     )
+
+
+def ensure_columns(ws, names):
+    """
+    Appends any missing header names to row 1, growing the grid first if needed.
+
+    Returns the {header: 1-based column} map after the update. Only call this from
+    jobs in the `sheet-writer` concurrency group so two runs never race for a column.
+    """
+    headers = ws.row_values(1)
+    existing = {h: i + 1 for i, h in enumerate(headers)}
+
+    updates = []
+    next_col = len(headers) + 1
+    for name in names:
+        if name not in existing:
+            updates.append({"row": 1, "col": next_col, "value": name})
+            existing[name] = next_col
+            next_col += 1
+
+    if updates:
+        needed_cols = max(u["col"] for u in updates)
+        if ws.col_count < needed_cols:
+            ws.add_cols(needed_cols - ws.col_count)
+        batch_update_cells(ws, updates)
+
+    return existing
+
+
+def verify_row_game_ids(ws, expected, gid_col: int):
+    """
+    Returns the subset of row numbers whose game_id cell still matches `expected`
+    ({row: game_id}, 1-based rows), so idx + 2 writes from a long-lived job never
+    land on a row another job has shifted or rewritten since the sheet was read.
+    """
+    if not expected:
+        return set()
+    gid_values = retry_api_call(ws.col_values, gid_col)
+    return {
+        row for row, gid in expected.items()
+        if row - 1 < len(gid_values) and str(gid_values[row - 1]).strip() == str(gid).strip()
+    }

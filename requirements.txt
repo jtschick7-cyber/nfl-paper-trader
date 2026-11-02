@@ -1,12 +1,17 @@
-gspread
-google-auth
-pandas<2.0
-numpy<2.0
-scikit-learn
-nfl_data_py
-pytz
-requests
-pyyaml
-scipy
-joblib
-pytest
+# Exact pins, verified on Python 3.12 (CI and workflows) with the full test suite and
+# joblib.load of every models/*.pkl. numpy stays on 1.x because the pickles were written
+# with numpy 1.26 / scikit-learn 1.7.2. nfl_data_py 0.3.3 requires pandas<2 (no 3.12
+# wheels), so 0.3.2 is pinned; the project is archived upstream in favour of nflreadpy.
+gspread==6.2.1
+google-auth==2.62.0
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.7.2
+nfl_data_py==0.3.2
+fastparquet==2026.9.0
+pytz==2026.6
+requests==2.34.2
+pyyaml==6.0.3
+scipy==1.17.1
+joblib==1.6.0
+pytest==9.2.0

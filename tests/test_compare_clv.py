@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.compare_models import clv_win_probability, compute_metrics, grade_single_bet
+from src.compare_models import clv_win_probability, closing_reference_line, compute_metrics, grade_single_bet
 
 
 def test_clv_probability_values_key_numbers():
@@ -24,3 +24,10 @@ def test_ties_reported_separately_from_beat_rate():
     m = compute_metrics(bets, "test")
     assert m["clv_beat_pct"] == pytest.approx(50.0)
     assert m["clv_tie_pct"] == pytest.approx(50.0)
+
+
+def test_clv_prefers_consensus_close():
+    assert closing_reference_line({"closing_line": -3.0, "closing_consensus_line": -3.5}) == -3.5
+    assert closing_reference_line({"closing_line": -3.0, "closing_consensus_line": float("nan")}) == -3.0
+    assert closing_reference_line({"closing_line": -3.0}) == -3.0
+    assert closing_reference_line({"closing_line": "", "closing_consensus_line": ""}) is None

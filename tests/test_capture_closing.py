@@ -245,6 +245,7 @@ def test_capture_closing_recovers_cache_before_live_fetch(tmp_path, monkeypatch)
             "closing_odds": float("nan"),
             "closing_away_odds": float("nan"),
             "closing_captured_at": "",
+            "closing_consensus_line": float("nan"),
             "pick_team": "",
             "pick_side": "",
             "status": "RESULT_UPDATED",
@@ -260,6 +261,7 @@ def test_capture_closing_recovers_cache_before_live_fetch(tmp_path, monkeypatch)
             "closing_odds": float("nan"),
             "closing_away_odds": float("nan"),
             "closing_captured_at": "",
+            "closing_consensus_line": float("nan"),
             "pick_team": "DET",
             "pick_side": "HOME",
             "status": "OPEN_CAPTURED",
@@ -318,6 +320,9 @@ def test_capture_closing_recovers_cache_before_live_fetch(tmp_path, monkeypatch)
         def row_values(self, _):
             return headers
 
+        def col_values(self, _):
+            return ["game_id"] + list(sheet_df["game_id"])
+
     captured_updates = []
 
     monkeypatch.setattr("src.capture_closing.get_sheet_as_df", lambda: sheet_df)
@@ -341,6 +346,8 @@ def test_capture_closing_recovers_cache_before_live_fetch(tmp_path, monkeypatch)
     # Row 3 (2026_08_MIN_DET): captured live -3.0 and transitioned to CLOSE_CAPTURED
     assert row3[col_idx["closing_line"]] == -3.0
     assert row3[col_idx["status"]] == "CLOSE_CAPTURED"
+    assert row3[col_idx["closing_consensus_line"]] == -3.0
+    assert row2[col_idx["closing_consensus_line"]] == -3.0
 
     assert "settled_backfilled=true" in gh_out.read_text(encoding="utf-8")
 
@@ -449,3 +456,68 @@ def test_backfill_tnf_and_shadow_clv_evaluation(monkeypatch):
     assert by_model["Model v3 (EPA + Discrete Keys)"]["avg_clv"] == 0.5
     assert by_model["Model v4 (EPA+QB+Luck+Totals)"]["clv_beat_pct"] == 100.0
     assert by_model["Model v4 (EPA+QB+Luck+Totals)"]["avg_clv"] == 0.5
+
+
+def test_build_closing_row_updates_writes_consensus_when_column_exists():
+    row = {"game_id": "g", "status": "OPEN_CAPTURED", "home_team": "KC", "away_team": "BUF", "notes": ""}
+    col = {"closing_line": 1, "closing_odds": 2, "closing_away_odds": 3, "closing_captured_at": 4, "status": 5, "closing_consensus_line": 6}
+    updates = build_closing_row_updates(row, 7, col, -3.0, -110.0, -110.0, "2026-11-01T17:00:00+00:00", consensus_spread=-3.25)
+    by_col = {u["col"]: u["value"] for u in updates}
+    assert by_col[6] == -3.25
+
+    # Sheets that have not grown the column yet are left untouched
+    del col["closing_consensus_line"]
+    updates = build_closing_row_updates(row, 7, col, -3.0, -110.0, -110.0, "2026-11-01T17:00:00+00:00", consensus_spread=-3.25)
+    assert 6 not in {u["col"] for u in updates}
+
+
+def test_capture_closing_skips_rows_whose_game_id_moved(tmp_path, monkeypatch):
+    now_fixed = datetime(2026, 11, 1, 17, 0, 0, tzinfo=pytz.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now_fixed if tz else now_fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.capture_closing.datetime", FixedDateTime)
+    monkeypatch.setattr("src.capture_closing.ATTEMPTS_FILE", str(tmp_path / "attempts.json"))
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    kickoff = (now_fixed + timedelta(minutes=30)).isoformat()
+    sheet_df = pd.DataFrame([
+        {"game_id": gid, "home_team": home, "away_team": away, "kickoff_time": kickoff,
+         "opening_line": -3.0, "closing_line": float("nan"), "closing_odds": float("nan"),
+         "closing_captured_at": "", "pick_team": "", "pick_side": "", "status": "OPEN_CAPTURED", "notes": ""}
+        for gid, home, away in [("2026_09_BUF_KC", "KC", "BUF"), ("2026_09_NYJ_MIA", "MIA", "NYJ")]
+    ])
+
+    def book(home, away, point):
+        return {
+            "id": home, "commence_time": kickoff, "home_team": home, "away_team": away,
+            "bookmakers": [{"key": "draftkings", "title": "DraftKings", "markets": [{
+                "key": "spreads", "last_update": now_fixed.isoformat(),
+                "outcomes": [{"name": home, "point": point, "price": -110.0},
+                             {"name": away, "point": -point, "price": -110.0}],
+            }]}],
+        }
+
+    payload = [book("Kansas City Chiefs", "Buffalo Bills", -2.5), book("Miami Dolphins", "New York Jets", -1.0)]
+    headers = list(sheet_df.columns)
+
+    class DummyWS:
+        def row_values(self, _):
+            return headers
+
+        def col_values(self, _):
+            # Another job rewrote row 3 between our read and our write
+            return ["game_id", "2026_09_BUF_KC", "2026_09_SOMETHING_ELSE"]
+
+    captured = []
+    monkeypatch.setattr("src.capture_closing.get_sheet_as_df", lambda: sheet_df)
+    monkeypatch.setattr("src.capture_closing.get_master_sheet", lambda: DummyWS())
+    monkeypatch.setattr("src.capture_closing.fetch_odds_api", lambda **kw: payload)
+    monkeypatch.setattr("src.capture_closing.batch_update_cells", lambda ws, u: captured.extend(u))
+
+    capture_closing(cache_dir=str(tmp_path))
+
+    assert {u["row"] for u in captured} == {2}

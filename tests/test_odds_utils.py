@@ -115,6 +115,8 @@ def test_parse_spreads_multi_book():
     # Best away line: +3.0 (from DraftKings / BetOnline) is better than +2.5
     assert p["best_away_line"] == 3.0
     assert p["total_line"] == 47.5
+    # Consensus close is the median home spread across all books (-3, -2.5, -3)
+    assert p["consensus_home_spread"] == -3.0
 
 
 def test_get_cached_live_home_spread_and_priority(tmp_path, monkeypatch):
