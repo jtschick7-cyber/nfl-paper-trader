@@ -176,8 +176,10 @@ def main():
             american_to_implied_prob(away_odds),
         )
 
-        edge_home = p_home - fair_home
-        edge_away = p_away - fair_away
+        # Edge is measured against the break-even probability of the price actually
+        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
+        edge_home = p_home - american_to_implied_prob(home_odds)
+        edge_away = p_away - american_to_implied_prob(away_odds)
 
         if edge_home >= edge_away:
             side = "HOME"

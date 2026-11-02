@@ -113,7 +113,9 @@ def discrete_margin_probabilities(mu, sigma=13.4, max_margin=50):
                     weights[idx] = emp_freq / gauss_freq
                 else:
                     ratio = emp_freq / (2.0 * gauss_freq)
-                    dampened = np.clip(ratio, 0.7, 1.6)
+                    # Bounds wide enough that 3 and 7 keep their empirical spikes
+                    # (a 1.6 cap halved push rates at -3/-7 vs 2010+ history).
+                    dampened = np.clip(ratio, 0.4, 3.0)
                     weights[idx] = dampened
 
     # 2. Iterative mean-correction to prevent mean-shift distortion

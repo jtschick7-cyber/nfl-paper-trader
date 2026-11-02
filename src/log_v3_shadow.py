@@ -398,8 +398,10 @@ def main():
             except Exception:
                 pass
 
-        edge_home = p_home_cal - fair_h
-        edge_away = p_away_cal - fair_a
+        # Edge is measured against the break-even probability of the price actually
+        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
+        edge_home = p_home_cal - american_to_implied_prob(home_odds)
+        edge_away = p_away_cal - american_to_implied_prob(away_odds)
 
         if edge_home >= edge_away:
             best_side = "HOME"

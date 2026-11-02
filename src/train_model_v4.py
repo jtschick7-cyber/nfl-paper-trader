@@ -344,7 +344,7 @@ def collect_v4_calibration_evidence(dataset, features, alpha=15.0):
         val_df = dataset.iloc[val_idx]
 
         scaler_f = StandardScaler().fit(X_tr)
-        ridge_f = Ridge(alpha=alpha).fit(scaler_f.transform(X_tr), y_tr)
+        ridge_f = fit_constrained_ridge(scaler_f.transform(X_tr), y_tr, alpha=alpha)
 
         resid = y_tr - ridge_f.predict(scaler_f.transform(X_tr))
         sigma_f = float(np.std(resid)) if len(resid) > 1 else 13.2
@@ -420,9 +420,8 @@ def train_v4_model(train_seasons=None):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # L2 Ridge Regression for Margin Prediction
-    ridge = Ridge(alpha=15.0)
-    ridge.fit(X_scaled, y)
+    # Box-constrained L2 Ridge Regression for Margin Prediction
+    ridge = fit_constrained_ridge(X_scaled, y, alpha=15.0)
 
     y_pred = ridge.predict(X_scaled)
     residuals = y - y_pred

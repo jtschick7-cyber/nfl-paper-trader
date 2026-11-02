@@ -436,8 +436,10 @@ def run_v4_shadow_evaluations():
             except Exception:
                 pass
 
-        edge_h = p_home_cal - fair_h
-        edge_a = p_away_cal - fair_a
+        # Edge is measured against the break-even probability of the price actually
+        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
+        edge_h = p_home_cal - american_to_implied_prob(home_odds)
+        edge_a = p_away_cal - american_to_implied_prob(away_odds)
 
         if edge_h >= edge_a:
             best_team = home

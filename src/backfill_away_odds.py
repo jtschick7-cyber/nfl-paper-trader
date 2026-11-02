@@ -171,7 +171,8 @@ def main():
         else:
             continue
 
-        edge = model_p - fair_p
+        # Edge vs the break-even probability of the price taken (matches generate_picks).
+        edge = model_p - american_to_implied_prob(new_pick_odds)
 
         base_note = ""
 

@@ -10,24 +10,24 @@
     "diff_rest",
     "division"
   ],
-  "sigma": 13.11061853816196,
-  "rmse": 13.11061853816196,
-  "r2": 0.163061383371912,
+  "sigma": 13.11291677329729,
+  "rmse": 13.11291677329729,
+  "r2": 0.16276793416228175,
   "coefficients": {
-    "elo_diff": 4.1521,
-    "diff_pass_epa": 0.7964,
-    "diff_rush_epa": -0.001,
-    "diff_success_rate": 0.9463,
-    "diff_early_down_epa": -0.3444,
-    "diff_margin": 0.9112,
-    "diff_rest": 0.8304,
-    "division": -0.0558
+    "elo_diff": 4.1472,
+    "diff_pass_epa": 0.5341,
+    "diff_rush_epa": 0.0,
+    "diff_success_rate": 0.946,
+    "diff_early_down_epa": 0.0,
+    "diff_margin": 0.9189,
+    "diff_rest": 0.8235,
+    "division": -0.0506
   },
   "intercept": 2.207107843137255,
-  "calibrator_method": "logistic",
+  "calibrator_method": "no_edge",
   "calibrator_params": [
     0.0,
-    0.2
+    -0.1103010334715543
   ],
   "train_rows": 816,
   "trained_seasons": [

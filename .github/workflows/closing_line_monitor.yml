@@ -31,7 +31,7 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 345
 
     env:
       GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
@@ -73,9 +73,11 @@ jobs:
         if: ${{ inputs.run_backfill == true || inputs.run_backfill == 'true' }}
         run: python -m src.backfill_closing
 
+      # Self-pacing loop: one run that fires (even hours late) stays alive and wakes at
+      # fixed leads before each kickoff, since GitHub drops most dense cron triggers.
       - name: Capture closing lines
         id: capture
-        run: python -m src.capture_closing
+        run: python -m src.closing_loop
 
       - name: Check if odds cache changed
         id: cache_after

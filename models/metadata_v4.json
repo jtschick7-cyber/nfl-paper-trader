@@ -12,26 +12,26 @@
     "diff_qb_shock",
     "diff_fumble_luck_per_gm"
   ],
-  "sigma": 13.091178573731524,
-  "rmse": 13.091178573731524,
-  "r2": 0.1655415096231725,
+  "sigma": 13.104090051614868,
+  "rmse": 13.104090051614868,
+  "r2": 0.1638946899145669,
   "coefficients": {
-    "elo_diff": 4.0871,
-    "diff_pass_epa": 1.0397,
-    "diff_rush_epa": 0.0529,
-    "diff_success_rate": 1.079,
-    "diff_early_down_epa": -0.3972,
-    "diff_margin": 0.842,
-    "diff_rest": 0.8305,
-    "division": -0.0848,
-    "diff_qb_shock": 0.4529,
-    "diff_fumble_luck_per_gm": 0.5396
+    "elo_diff": 4.133,
+    "diff_pass_epa": 0.7719,
+    "diff_rush_epa": 0.0,
+    "diff_success_rate": 0.9691,
+    "diff_early_down_epa": 0.0,
+    "diff_margin": 0.9641,
+    "diff_rest": 0.8245,
+    "division": -0.0633,
+    "diff_qb_shock": 0.4186,
+    "diff_fumble_luck_per_gm": -0.0
   },
   "intercept": 2.207107843137255,
-  "calibrator_method": "logistic",
+  "calibrator_method": "no_edge",
   "calibrator_params": [
-    0.0,
-    0.2
+    4.62960561458196e-17,
+    -0.13331159670750264
   ],
   "train_rows": 816,
   "trained_seasons": [

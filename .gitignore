@@ -14,3 +14,4 @@ data/backtest_model_threshold_picks.csv
 data/v4_shadow_picks.csv
 chat-export*.json
 *.jsonl
+.claude/handoff_backups/

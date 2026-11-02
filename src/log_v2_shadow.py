@@ -313,8 +313,10 @@ def main():
             american_to_implied_prob_scalar(away_odds),
         )
 
-        edge_home = p_home_cal - fair_home
-        edge_away = p_away_cal - fair_away
+        # Edge is measured against the break-even probability of the price actually
+        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
+        edge_home = p_home_cal - american_to_implied_prob_scalar(home_odds)
+        edge_away = p_away_cal - american_to_implied_prob_scalar(away_odds)
 
         if edge_home >= edge_away:
             best_side = "HOME"

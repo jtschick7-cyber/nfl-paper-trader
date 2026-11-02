@@ -508,10 +508,11 @@ def fit_calibrator(evidence_df):
     if not math.isfinite(intercept) or not math.isfinite(coef):
         return ("logistic", (0.0, 0.20))
 
-    # A non-positive slope is not a usable monotonic calibration.
-    # Fall back to conservative shrinkage rather than identity (slope 1.0).
+    # A non-positive out-of-sample slope means the raw probabilities carry no
+    # (or inverted) information about cover outcomes. Substituting a positive
+    # slope would manufacture edges, so flag the model as having no edge.
     if coef <= 0.0:
-        return ("logistic", (0.0, 0.20))
+        return ("no_edge", (intercept, coef))
 
     return ("logistic", (intercept, coef))
 
@@ -529,6 +530,9 @@ def calibrate_probability(calibrator, p):
 
     if method == "identity":
         return p
+
+    if method == "no_edge":
+        return 0.5
 
     if method == "logistic":
         intercept, coef = params
