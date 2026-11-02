@@ -31,6 +31,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
+from src.market_blend import blend_margin, fit_market_beta
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
@@ -212,14 +213,15 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
 def train_v3_model(train_seasons=None):
     if train_seasons is None:
         # Default to historical seasons prior to current season
-        train_seasons = [2023, 2024, 2025]
+        # 2012+ leaves two seasons of 2010-2011 play-by-play to warm up rolling features
+        train_seasons = list(range(2012, SEASON))
 
     print(f"Loading EPA data from {EPA_DATA_PATH}...")
     if not os.path.exists(EPA_DATA_PATH):
         raise SystemExit(f"EPA data missing. Run: python -m src.build_features")
 
     epa_df = pd.read_csv(EPA_DATA_PATH)
-    sched_df = _load_sched(list(range(2020, max(train_seasons) + 1)))
+    sched_df = _load_sched(list(range(min(train_seasons) - 2, max(train_seasons) + 1)))
 
     print(f"Building v3 training dataset for seasons {train_seasons}...")
     dataset = build_v3_training_dataset(train_seasons, epa_df, sched_df)
@@ -255,50 +257,43 @@ def train_v3_model(train_seasons=None):
     # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator
     # Uses chronological TimeSeriesSplit with symmetric HOME/AWAY rows (weight=0.5)
     # and monotonicity guard coef > 0
+    # Market blend: walk-forward OOS margins fit beta, the share of model-vs-market
+    # disagreement that predicts ATS results; probabilities use the blended margin.
     from sklearn.model_selection import TimeSeriesSplit
     tscv = TimeSeriesSplit(n_splits=5)
 
-    evidence_rows = []
+    oos_idx = []
+    oos_mu = []
     for train_idx, val_idx in tscv.split(dataset):
-        X_tr, y_tr = X[train_idx], y[train_idx]
-        X_val = X[val_idx]
-        val_df = dataset.iloc[val_idx]
+        scaler_f = StandardScaler().fit(X[train_idx])
+        ridge_f = fit_constrained_ridge(scaler_f.transform(X[train_idx]), y[train_idx], alpha=15.0)
+        oos_idx.extend(val_idx)
+        oos_mu.extend(ridge_f.predict(scaler_f.transform(X[val_idx])))
 
-        scaler_f = StandardScaler().fit(X_tr)
-        ridge_f = fit_constrained_ridge(scaler_f.transform(X_tr), y_tr, alpha=15.0)
+    oos_df = dataset.iloc[oos_idx].copy()
+    oos_df["oos_mu"] = oos_mu
+    beta, beta_se, n_beta = fit_market_beta(oos_df["oos_mu"], oos_df["home_line"], oos_df["actual_home_margin"])
+    oos_df["blend_mu"] = [blend_margin(m, hl, beta) for m, hl in zip(oos_df["oos_mu"], oos_df["home_line"])]
+    blend_sigma = float(np.std(oos_df["actual_home_margin"] - oos_df["blend_mu"]))
+    blend_info = {"market_beta": beta, "market_beta_se": beta_se, "blend_rows": n_beta, "blend_sigma": blend_sigma}
+    print(f"\nMarket blend: beta={beta:.3f} (se {beta_se:.3f}, n={n_beta}), blended sigma={blend_sigma:.2f}")
 
-        resid = y_tr - ridge_f.predict(scaler_f.transform(X_tr))
-        sigma_f = float(np.std(resid)) if len(resid) > 1 else 13.4
+    evidence_rows = []
+    for _, row in oos_df.iterrows():
+        home_line = float(row["home_line"])
+        diff = float(row["actual_home_margin"]) + home_line
+        push = abs(diff) < 1e-5
 
-        mu_val = ridge_f.predict(scaler_f.transform(X_val))
+        sp = calculate_spread_probabilities(row["blend_mu"], blend_sigma, home_line)
+        p_h = float(sp["cond_home_win"])
 
-        for j, (_, row) in enumerate(val_df.iterrows()):
-            home_line = float(row["home_line"])
-            act_margin = float(row["actual_home_margin"])
-            diff = act_margin + home_line
-            push = abs(diff) < 1e-5
-            home_win = diff > 0
-            away_win = diff < 0
-
-            sp = calculate_spread_probabilities(mu_val[j], sigma_f, home_line)
-            p_h = float(sp["cond_home_win"])
-            p_a = 1.0 - p_h
-
+        for side, p_raw, win in [("HOME", p_h, diff > 0), ("AWAY", 1.0 - p_h, diff < 0)]:
             evidence_rows.append({
                 "season": int(row["season"]),
                 "game_id": row["game_id"],
-                "side": "HOME",
-                "p_raw": p_h,
-                "actual_win": bool(home_win),
-                "push": bool(push),
-                "weight": 0.5,
-            })
-            evidence_rows.append({
-                "season": int(row["season"]),
-                "game_id": row["game_id"],
-                "side": "AWAY",
-                "p_raw": p_a,
-                "actual_win": bool(away_win),
+                "side": side,
+                "p_raw": p_raw,
+                "actual_win": bool(win),
                 "push": bool(push),
                 "weight": 0.5,
             })
@@ -315,7 +310,9 @@ def train_v3_model(train_seasons=None):
         "feature_columns": V3_FEATURES,
         "scaler": scaler,
         "ridge": ridge,
-        "sigma": sigma,
+        "sigma": blend_sigma,
+        "model_sigma": sigma,
+        **blend_info,
         "calibrator": calibrator,
         "calibrator_method": calibrator_method,
         "calibrator_params": calibrator_params,
@@ -326,7 +323,9 @@ def train_v3_model(train_seasons=None):
     meta = {
         "model_version": "v3_epa_enhanced",
         "feature_columns": V3_FEATURES,
-        "sigma": sigma,
+        "sigma": blend_sigma,
+        "model_sigma": sigma,
+        **blend_info,
         "rmse": rmse,
         "r2": r2,
         "coefficients": coef_dict,

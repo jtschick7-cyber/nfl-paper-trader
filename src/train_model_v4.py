@@ -32,6 +32,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
+from src.market_blend import blend_margin, fit_market_beta
 from src.key_numbers import calculate_spread_probabilities, calculate_totals_conditioned_sigma
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
@@ -328,67 +329,59 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
 
 def collect_v4_calibration_evidence(dataset, features, alpha=15.0):
     """
-    Collects out-of-sample raw probabilities across historical training folds.
-    Uses chronological TimeSeriesSplit with symmetric HOME/AWAY rows (weight=0.5).
+    Walk-forward (TimeSeriesSplit) out-of-sample evidence for the market blend and calibrator.
+    1. Collects OOS model margins and fits beta: how far to move off the market line.
+    2. Builds symmetric HOME/AWAY rows (weight=0.5) from blended-margin probabilities.
+    Returns (evidence_df, blend_info).
     """
     from sklearn.model_selection import TimeSeriesSplit
     tscv = TimeSeriesSplit(n_splits=5)
 
-    rows = []
     X_all = dataset[features].values
     y_all = dataset["actual_home_margin"].values
 
+    oos_idx = []
+    oos_mu = []
     for train_idx, val_idx in tscv.split(dataset):
-        X_tr, y_tr = X_all[train_idx], y_all[train_idx]
-        X_val = X_all[val_idx]
-        val_df = dataset.iloc[val_idx]
+        scaler_f = StandardScaler().fit(X_all[train_idx])
+        ridge_f = fit_constrained_ridge(scaler_f.transform(X_all[train_idx]), y_all[train_idx], alpha=alpha)
+        oos_idx.extend(val_idx)
+        oos_mu.extend(ridge_f.predict(scaler_f.transform(X_all[val_idx])))
 
-        scaler_f = StandardScaler().fit(X_tr)
-        ridge_f = fit_constrained_ridge(scaler_f.transform(X_tr), y_tr, alpha=alpha)
+    oos_df = dataset.iloc[oos_idx].copy()
+    oos_df["oos_mu"] = oos_mu
+    beta, beta_se, n_beta = fit_market_beta(oos_df["oos_mu"], oos_df["home_line"], oos_df["actual_home_margin"])
+    oos_df["blend_mu"] = [blend_margin(m, hl, beta) for m, hl in zip(oos_df["oos_mu"], oos_df["home_line"])]
+    blend_sigma = float(np.std(oos_df["actual_home_margin"] - oos_df["blend_mu"]))
 
-        resid = y_tr - ridge_f.predict(scaler_f.transform(X_tr))
-        sigma_f = float(np.std(resid)) if len(resid) > 1 else 13.2
+    rows = []
+    for _, row in oos_df.iterrows():
+        home_line = float(row["home_line"])
+        diff = float(row["actual_home_margin"]) + home_line
+        push = abs(diff) < 1e-5
 
-        mu_val = ridge_f.predict(scaler_f.transform(X_val))
+        sp = calculate_spread_probabilities(row["blend_mu"], blend_sigma, home_line, total_line=row.get("total_line"))
+        p_h = float(sp["cond_home_win"])
 
-        for j, (_, row) in enumerate(val_df.iterrows()):
-            home_line = float(row["home_line"])
-            act_margin = float(row["actual_home_margin"])
-            tot_line = row.get("total_line")
-            diff = act_margin + home_line
-            push = abs(diff) < 1e-5
-            home_win = diff > 0
-            away_win = diff < 0
-
-            sp = calculate_spread_probabilities(mu_val[j], sigma_f, home_line, total_line=tot_line)
-            p_h = float(sp["cond_home_win"])
-            p_a = 1.0 - p_h
-
+        for side, p_raw, win in [("HOME", p_h, diff > 0), ("AWAY", 1.0 - p_h, diff < 0)]:
             rows.append({
                 "season": int(row["season"]),
                 "game_id": row["game_id"],
-                "side": "HOME",
-                "p_raw": p_h,
-                "actual_win": bool(home_win),
-                "push": bool(push),
-                "weight": 0.5,
-            })
-            rows.append({
-                "season": int(row["season"]),
-                "game_id": row["game_id"],
-                "side": "AWAY",
-                "p_raw": p_a,
-                "actual_win": bool(away_win),
+                "side": side,
+                "p_raw": p_raw,
+                "actual_win": bool(win),
                 "push": bool(push),
                 "weight": 0.5,
             })
 
-    return pd.DataFrame(rows)
+    blend_info = {"market_beta": beta, "market_beta_se": beta_se, "blend_rows": n_beta, "blend_sigma": blend_sigma}
+    return pd.DataFrame(rows), blend_info
 
 
 def train_v4_model(train_seasons=None):
     if train_seasons is None:
-        train_seasons = [2023, 2024, 2025]
+        # 2012+ leaves two seasons of 2010-2011 play-by-play to warm up rolling features
+        train_seasons = list(range(2012, SEASON))
 
     print("=============================================================")
     print(f"Training Model v4 (QB-Attributed & Turnover-Regressed)")
@@ -407,7 +400,7 @@ def train_v4_model(train_seasons=None):
     turnover_df = pd.read_csv(TURNOVER_DATA_PATH)
 
     # Load historical schedules starting from 2020 for Elo warm-up
-    all_sched_seasons = sorted(list(set(range(2020, max(train_seasons) + 1))))
+    all_sched_seasons = sorted(list(set(range(min(train_seasons) - 2, max(train_seasons) + 1))))
     sched_df = _load_sched(all_sched_seasons)
 
     print("Compiling Model v4 training dataset...")
@@ -442,7 +435,12 @@ def train_v4_model(train_seasons=None):
     print(f"  {'intercept':25s}: {ridge.intercept_:+.3f} pts")
 
     # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator
-    evidence_df = collect_v4_calibration_evidence(dataset, V4_FEATURES, alpha=15.0)
+    evidence_df, blend_info = collect_v4_calibration_evidence(dataset, V4_FEATURES, alpha=15.0)
+    print(
+        f"\nMarket blend: beta={blend_info['market_beta']:.3f} "
+        f"(se {blend_info['market_beta_se']:.3f}, n={blend_info['blend_rows']}), "
+        f"blended sigma={blend_info['blend_sigma']:.2f}"
+    )
     calibrator = fit_calibrator(evidence_df)
     calibrator_method, calibrator_params = calibrator
     print(f"\nCalibrator: method={calibrator_method}, params={calibrator_params}")
@@ -454,7 +452,9 @@ def train_v4_model(train_seasons=None):
         "feature_columns": V4_FEATURES,
         "scaler": scaler,
         "ridge": ridge,
-        "sigma": base_sigma,
+        "sigma": blend_info["blend_sigma"],
+        "model_sigma": base_sigma,
+        **blend_info,
         "calibrator": calibrator,
         "calibrator_method": calibrator_method,
         "calibrator_params": calibrator_params,
@@ -465,7 +465,9 @@ def train_v4_model(train_seasons=None):
     meta = {
         "model_version": "v4_qb_turnover_enhanced",
         "feature_columns": V4_FEATURES,
-        "sigma": base_sigma,
+        "sigma": blend_info["blend_sigma"],
+        "model_sigma": base_sigma,
+        **blend_info,
         "rmse": rmse,
         "r2": r2,
         "coefficients": coef_dict,

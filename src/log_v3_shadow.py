@@ -24,6 +24,7 @@ import pytz
 from src.config import GSHEET_CREDENTIALS, MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON, SPREADSHEET_ID
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.injury_guard import audit_candidate_pick
+from src.market_blend import blend_margin
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, calibrate_probability
@@ -243,6 +244,7 @@ def main():
     ensure_epa_cache_is_current()
 
     artifact = joblib.load(MODEL_PATH)
+    market_beta = artifact.get("market_beta")
     feature_columns = artifact["feature_columns"]
     scaler = artifact["scaler"]
     ridge = artifact["ridge"]
@@ -366,6 +368,9 @@ def main():
 
         X = np.array([[feat_vals[c] for c in feature_columns]], dtype=float)
         mu = float(ridge.predict(scaler.transform(X))[0])
+        # Anchor on the market line; move off it only by the OOS-fitted share (beta)
+        if market_beta is not None:
+            mu = blend_margin(mu, home_line, market_beta)
 
         # Discrete key-number aware spread probabilities
         spread_res = calculate_spread_probabilities(mu, sigma, home_line)
