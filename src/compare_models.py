@@ -29,10 +29,13 @@ except ImportError:
     nfl = None
 
 from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, SEASON
+from src.key_numbers import calculate_spread_probabilities
 from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.v2_sheet_utils import get_or_create_worksheet
 
 SCORECARD_TAB = "Model_Scorecard"
+# Margin sigma used to value line movement in CLV (market close as the mean margin)
+CLV_SIGMA = 13.1
 
 
 def safe_float(value, default=None):
@@ -103,6 +106,20 @@ def load_final_scores(season=SEASON):
         return {}
 
 
+def clv_win_probability(pick_line, closing_pick_line, sigma=CLV_SIGMA):
+    """
+    Win probability gained (or lost) from line movement, in probability points.
+    Treats the closing line as the market's margin and compares the key-number-aware
+    no-push cover probability at the line taken vs at the closing line, so a move off
+    3 or 7 counts for more than a move between dead numbers. Price changes are ignored
+    (closing price for the pick side is not stored).
+    """
+    close_mu = -float(closing_pick_line)
+    p_taken = calculate_spread_probabilities(close_mu, sigma, float(pick_line))["cond_home_win"]
+    p_close = calculate_spread_probabilities(close_mu, sigma, float(closing_pick_line))["cond_home_win"]
+    return float(p_taken - p_close)
+
+
 def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None):
     """Grades a single spread bet and calculates realized CLV."""
     side = str(side).strip().upper()
@@ -137,9 +154,13 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
 
     clv_pts = None
     clv_beat = None
+    clv_result = None
+    clv_prob = None
     if closing_pick_line is not None:
         clv_pts = line - float(closing_pick_line)
         clv_beat = clv_pts > 0
+        clv_result = "BEAT" if clv_pts > 1e-9 else ("LOSE" if clv_pts < -1e-9 else "TIE")
+        clv_prob = clv_win_probability(line, float(closing_pick_line))
 
     return {
         "game_id": game_id,
@@ -149,6 +170,8 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         "kelly_units": round(k_pnl, 4),
         "clv_points": clv_pts,
         "clv_beat": clv_beat,
+        "clv_result": clv_result,
+        "clv_prob": clv_prob,
         "margin": margin,
         "cover": cover,
     }
@@ -169,7 +192,9 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
             "kelly_units": 0.0,
             "kelly_roi_pct": 0.0,
             "clv_beat_pct": 0.0,
+            "clv_tie_pct": 0.0,
             "avg_clv": 0.0,
+            "avg_clv_prob_pct": 0.0,
         }
 
     wins = sum(1 for b in graded_bets if b["result"] == "WIN")
@@ -186,14 +211,22 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
     total_k_staked = sum(b.get("kelly_stake", FLAT_BET_SIZE) for b in graded_bets)
     kelly_roi_pct = round(kelly_units / total_k_staked * 100.0, 2) if total_k_staked > 0 else 0.0
 
+    # CLV beat % is over bets where the line moved (beats vs loses); ties are reported separately
     clv_evaluated = [b for b in graded_bets if b["clv_points"] is not None]
     if clv_evaluated:
-        clv_beats = sum(1 for b in clv_evaluated if b["clv_beat"])
-        clv_beat_pct = clv_beats / len(clv_evaluated) * 100.0
+        clv_beats = sum(1 for b in clv_evaluated if b.get("clv_result") == "BEAT")
+        clv_loses = sum(1 for b in clv_evaluated if b.get("clv_result") == "LOSE")
+        moved = clv_beats + clv_loses
+        clv_beat_pct = (clv_beats / moved * 100.0) if moved > 0 else 0.0
+        clv_tie_pct = (len(clv_evaluated) - moved) / len(clv_evaluated) * 100.0
         avg_clv = sum(b["clv_points"] for b in clv_evaluated) / len(clv_evaluated)
+        probs = [b["clv_prob"] for b in clv_evaluated if b.get("clv_prob") is not None]
+        avg_clv_prob_pct = (sum(probs) / len(probs) * 100.0) if probs else 0.0
     else:
         clv_beat_pct = 0.0
+        clv_tie_pct = 0.0
         avg_clv = 0.0
+        avg_clv_prob_pct = 0.0
 
     return {
         "model": model_name,
@@ -206,18 +239,25 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "kelly_units": kelly_units,
         "kelly_roi_pct": kelly_roi_pct,
         "clv_beat_pct": round(clv_beat_pct, 1),
+        "clv_tie_pct": round(clv_tie_pct, 1),
         "avg_clv": round(avg_clv, 2),
+        "avg_clv_prob_pct": round(avg_clv_prob_pct, 2),
     }
 
 
 def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
-    """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4)."""
+    """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4).
+
+    Shadow tabs are graded on each game's FIRST logged evaluation (the Tuesday decision,
+    matching v1). Keeping later re-evaluations let line moves toward the model turn picks
+    into PASS and drop them, biasing CLV and making the head-to-head unequal.
+    """
     if v2_df is not None and not v2_df.empty and "game_id" in v2_df.columns:
-        v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="last")
+        v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="first")
     if v3_df is not None and not v3_df.empty and "game_id" in v3_df.columns:
-        v3_df = v3_df.drop_duplicates(subset=["game_id"], keep="last")
+        v3_df = v3_df.drop_duplicates(subset=["game_id"], keep="first")
     if v4_df is not None and not v4_df.empty and "game_id" in v4_df.columns:
-        v4_df = v4_df.drop_duplicates(subset=["game_id"], keep="last")
+        v4_df = v4_df.drop_duplicates(subset=["game_id"], keep="first")
 
     closing_map = {}
     master_by_gid = {}
@@ -656,7 +696,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
 
     # Section 1: Summary Table
     rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", "", "", ""])
-    rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "Avg CLV Pts", "Kelly Units", "Kelly ROI %"])
+    rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "CLV Tie %", "Avg CLV Pts", "Avg CLV Win Prob", "Kelly Units", "Kelly ROI %"])
 
     for r in summary_rows:
         rows.append([
@@ -668,7 +708,9 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             f"{r['units']:+.2f}u",
             f"{r['roi_pct']:+.1f}%",
             f"{r['clv_beat_pct']:.1f}%",
+            f"{r.get('clv_tie_pct', 0.0):.1f}%",
             f"{r['avg_clv']:+.2f}",
+            f"{r.get('avg_clv_prob_pct', 0.0):+.2f}%",
             f"{r['kelly_units']:+.2f}u",
             f"{r['kelly_roi_pct']:+.1f}%",
         ])
