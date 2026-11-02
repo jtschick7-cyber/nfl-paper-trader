@@ -120,6 +120,12 @@ def clv_win_probability(pick_line, closing_pick_line, sigma=CLV_SIGMA):
     return float(p_taken - p_close)
 
 
+def closing_reference_line(row):
+    """Home closing spread used for CLV: the multi-book consensus close when captured, else the single-book close."""
+    consensus = safe_float(row.get("closing_consensus_line"))
+    return consensus if consensus is not None else safe_float(row.get("closing_line"))
+
+
 def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None):
     """Grades a single spread bet and calculates realized CLV."""
     side = str(side).strip().upper()
@@ -266,7 +272,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
             gid = str(row.get("game_id", "")).strip()
             if gid:
                 master_by_gid[gid] = row
-                c_line = safe_float(row.get("closing_line"))
+                c_line = closing_reference_line(row)
                 if c_line is not None:
                     closing_map[gid] = c_line
 

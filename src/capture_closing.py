@@ -12,7 +12,7 @@ from src.odds_utils import (
     find_cached_pregame_closing_spread,
     parse_spreads,
 )
-from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
+from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df, verify_row_game_ids
 
 DRY_RUN_CLOSE = os.getenv("DRY_RUN_CLOSE", "").strip().lower() in {"1", "true", "yes", "y"}
 ATTEMPTS_FILE = os.path.join(CACHE_DIR, "closing_attempts.json")
@@ -166,9 +166,11 @@ def build_closing_row_updates(
     home_odds: float,
     away_odds: float,
     captured_at_iso: str,
+    consensus_spread: float = None,
 ):
     """
     Builds cell update dicts for populating closing line data on a Master_Bets row.
+    - Writes closing_consensus_line (median home spread across books) when the column exists.
     - Preserves RESULT_UPDATED / SETTLED status on post-game catch-up or backfill.
     - Computes clv_points / clv_flag when backfilling an already SETTLED bet.
     - Appends RLM_ALERT idempotently and clears stale MISSING_CLOSING_LINE notes.
@@ -184,6 +186,8 @@ def build_closing_row_updates(
     if away_odds is not None and not pd.isna(away_odds):
         set_col("closing_away_odds", float(away_odds))
     set_col("closing_captured_at", str(captured_at_iso))
+    if consensus_spread is not None and not pd.isna(consensus_spread):
+        set_col("closing_consensus_line", float(consensus_spread))
 
     status = str(row.get("status", "")).strip().upper()
     if status not in POSTGAME_STATUSES:
@@ -416,6 +420,7 @@ def capture_closing(cache_dir: str = None):
             home_odds=cached_mkt["home_odds"],
             away_odds=cached_mkt.get("away_odds"),
             captured_at_iso=cached_mkt["captured_at_utc"],
+            consensus_spread=cached_mkt.get("consensus_home_spread"),
         )
         updates.extend(row_updates)
         games_updated += 1
@@ -465,9 +470,25 @@ def capture_closing(cache_dir: str = None):
                 home_odds=odds_row["home_odds"],
                 away_odds=odds_row.get("away_odds"),
                 captured_at_iso=captured_ts,
+                consensus_spread=odds_row.get("consensus_home_spread"),
             )
             updates.extend(row_updates)
             games_updated += 1
+
+    # This job runs outside the sheet-writer group, so drop writes to any row whose
+    # game_id no longer matches what was read (idx + 2 must still point at the same game).
+    if updates and "game_id" in col:
+        rows_to_write = {u["row"] for u in updates}
+        expected = {
+            idx + 2: str(sheet_df.at[idx, "game_id"]).strip()
+            for idx in sheet_df.index
+            if idx + 2 in rows_to_write
+        }
+        valid_rows = verify_row_game_ids(ws, expected, col["game_id"])
+        stale = sorted(set(expected) - valid_rows)
+        if stale:
+            print(f"Skipping closing writes for rows whose game_id changed since read: {stale}")
+            updates = [u for u in updates if u["row"] in valid_rows]
 
     save_closing_attempts(attempts)
     batch_update_cells(ws, updates)

@@ -1,33 +1,20 @@
-from src.sheet_utils import batch_update_cells, get_master_sheet
+from src.sheet_utils import ensure_columns, get_master_sheet
+
+# Master_Bets columns added after the original schema; created here (a sheet-writer job)
+# so the long-lived closing loop only ever writes to headers that already exist.
+EXTRA_COLUMNS = ["opening_away_odds", "closing_away_odds", "total_line", "closing_consensus_line"]
 
 
 def main():
     ws = get_master_sheet()
-    headers = ws.row_values(1)
+    before = len(ws.row_values(1))
+    existing = ensure_columns(ws, EXTRA_COLUMNS)
 
-    existing = {h: i + 1 for i, h in enumerate(headers)}
-
-    updates = []
-    next_col = len(headers) + 1
-
-    for name in ["opening_away_odds", "closing_away_odds", "total_line"]:
-        if name not in existing:
-            updates.append({
-                "row": 1,
-                "col": next_col,
-                "value": name,
-            })
-            existing[name] = next_col
-            next_col += 1
-
-    if updates:
-        needed_cols = max(u["col"] for u in updates)
-        if ws.col_count < needed_cols:
-            ws.add_cols(needed_cols - ws.col_count)
-        batch_update_cells(ws, updates)
-        print("Added " + str(len(updates)) + " header(s) to Master_Bets.")
+    added = len(existing) - before
+    if added:
+        print("Added " + str(added) + " header(s) to Master_Bets.")
     else:
-        print("Away odds and total_line headers already exist.")
+        print("Extra Master_Bets headers already exist.")
 
     print("Current headers:")
     print(list(existing.keys()))

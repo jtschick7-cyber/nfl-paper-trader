@@ -306,6 +306,7 @@ def parse_spreads(api_data):
             "away_odds": outcomes[raw_away]["price"],
             "bookmaker": target_book.get("title", ""),
             # Multi-Book Consensus & Best-Line Shopping
+            "consensus_home_spread": float(np.median(book_spreads)) if book_spreads else float(outcomes[raw_home]["point"]),
             "consensus_fair_home": round(consensus_fair_h, 4),
             "consensus_fair_away": round(consensus_fair_a, 4),
             "books_count": len(fair_h_list),
