@@ -15,3 +15,8 @@ data/v4_shadow_picks.csv
 chat-export*.json
 *.jsonl
 .claude/handoff_backups/
+.claude/handoff_current.md
+.claude/handoff_history/
+.claude/handoff_pinned.md
+.claude/settings.local.json
+.claude/worktrees/
