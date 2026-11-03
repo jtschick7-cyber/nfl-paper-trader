@@ -58,9 +58,9 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 
 | Workflow | When (UTC) | What |
 | :--- | :--- | :--- |
-| `tuesday_opening.yml` | Tue 15:00, 18:00, 23:00; Wed/Thu 18:00 | Schedule, opening lines, v1 picks, v2–v4 shadow logs, scorecard |
+| `tuesday_opening.yml` | Tue 15:17, 18:17, 23:17; Wed/Thu 18:17 | Schedule, opening lines, v1 picks, v2–v4 shadow logs, scorecard |
 | `closing_line_monitor.yml` | Gameday cron (Wed–Mon) | **Self-pacing closing loop** (below), then scorecard if settled bets got a close |
-| `nightly_results.yml` | Daily 05:00 | Catch up missed closes from cached snapshots, settle results, scorecard |
+| `nightly_results.yml` | Daily 05:17 | Catch up missed closes from cached snapshots, settle results, scorecard |
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
 | `ci_tests.yml` | Push / PR to `main` | `pytest tests/` |
 
