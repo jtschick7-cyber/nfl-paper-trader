@@ -35,3 +35,15 @@ def test_all_workflows_use_python_312():
             text = f.read()
         assert 'python-version: "3.12"' in text, path
         assert "3.10" not in text, path
+
+
+def test_no_cron_fires_at_top_of_hour():
+    # GitHub delays top-of-hour scheduled runs by hours; keep every cron off minute 0.
+    for path in glob.glob(os.path.join(WORKFLOWS, "*.yml")):
+        with open(path) as f:
+            wf = yaml.safe_load(f)
+        triggers = wf.get("on", wf.get(True, {})) or {}
+        for entry in triggers.get("schedule", []) if isinstance(triggers, dict) else []:
+            minutes = entry["cron"].split()[0]
+            assert "0" not in minutes.split(","), f"{path}: {entry['cron']}"
+            assert "*" not in minutes, f"{path}: {entry['cron']}"
