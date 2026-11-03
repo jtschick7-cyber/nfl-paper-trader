@@ -109,6 +109,15 @@ HEADERS = [
 ]
 
 
+def sheet_safe(value):
+    """Makes a cell JSON-safe for the Sheets API: NaN/inf become blanks, numpy scalars become Python types."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return ""
+    return value
+
+
 def _dedup_key(game_id, home_line, home_odds):
     try:
         hl = f"{float(home_line):.2f}"
@@ -329,6 +338,11 @@ def run_v4_shadow_evaluations():
             home_line = float(row.get("opening_line"))
             home_odds = float(row.get("opening_odds"))
         except Exception:
+            skipped_no_line += 1
+            continue
+
+        # Blank sheet cells load as NaN, which float() accepts
+        if not (math.isfinite(home_line) and math.isfinite(home_odds)):
             skipped_no_line += 1
             continue
 
@@ -596,6 +610,9 @@ def run_v4_shadow_evaluations():
             capped_w = cap_slate_stakes(w_picks, max_slate_exposure=10.0)
             for b in capped_w:
                 new_rows[b["row_idx"]][stake_idx] = round(float(b["recommended_units"]), 2)
+
+        # One non-finite value fails the whole append, so blank them out
+        new_rows = [[sheet_safe(v) for v in r] for r in new_rows]
 
         # Save locally to CSV
         os.makedirs(os.path.dirname(LOCAL_CSV_PATH), exist_ok=True)

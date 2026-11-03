@@ -319,6 +319,11 @@ def main():
             skipped_no_line += 1
             continue
 
+        # Blank sheet cells load as NaN, which float() accepts
+        if not (math.isfinite(home_line) and math.isfinite(home_odds)):
+            skipped_no_line += 1
+            continue
+
         away_fallback = False
         try:
             away_odds = float(row.get("opening_away_odds"))
