@@ -264,6 +264,37 @@ def first_priced_decision(df, line_col):
     return df.drop_duplicates(subset=["game_id"], keep="first")
 
 
+def v3_kelly_stake_map(v3_df, max_slate_exposure=10.0):
+    """
+    Push-aware quarter-Kelly stakes for v3's active picks, capped per week.
+
+    V3_Shadow does not log a stake column, so this recomputes stakes the same way the
+    slate matrix does (and the way log_v4_shadow stores v4_stake_units). Pass the graded
+    rows (first priced decision per game) so stakes match the bets being graded.
+    """
+    from collections import defaultdict
+
+    if v3_df is None or v3_df.empty:
+        return {}
+    by_week = defaultdict(list)
+    for _, row in v3_df.iterrows():
+        dec = str(row.get("v3_decision", "")).strip().upper()
+        if dec not in {"SHADOW_PICK", "HIGH_CONVICTION"}:
+            continue
+        gid = str(row.get("game_id", "")).strip()
+        odds = safe_float(row.get("v3_best_odds"), -110.0)
+        prob = safe_float(row.get("v3_model_probability"), 0.52)
+        p_push = safe_float(row.get("p_push"), 0.05)
+        units = compute_push_aware_stake(prob * (1.0 - p_push), p_push, odds)["recommended_units"]
+        by_week[safe_int(row.get("week"), 0)].append({"game_id": gid, "recommended_units": units})
+
+    stakes = {}
+    for cands in by_week.values():
+        for b in cap_slate_stakes(cands, max_slate_exposure=max_slate_exposure):
+            stakes[b["game_id"]] = float(b["recommended_units"])
+    return stakes
+
+
 def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4).
 
@@ -349,6 +380,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     suppressed_bets = []
 
     if not v3_df.empty:
+        v3_stakes = v3_kelly_stake_map(v3_df)
         for _, row in v3_df.iterrows():
             gid = str(row.get("game_id", "")).strip()
             dec = str(row.get("v3_decision", "")).strip().upper()
@@ -370,6 +402,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    stake_units=v3_stakes.get(gid),
                 )
 
                 if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
@@ -619,16 +652,17 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
     print("        NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3 vs v4)       ")
     print("=" * 94)
 
-    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8} | {'Kelly U':<8} | {'Kelly ROI':<9}")
-    print("-" * 126)
+    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8} | {'CLV Tie':<7} | {'Kelly U':<8} | {'Kelly ROI':<9}")
+    print("-" * 136)
 
     for row in summary_rows:
         u_str = f"{row['units']:+.2f}u" if row['bets'] > 0 else "0.00u"
         roi_str = f"{row['roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
         clv_str = f"{row['clv_beat_pct']:.1f}%" if row['bets'] > 0 else "0.0%"
+        tie_str = f"{row.get('clv_tie_pct', 0.0):.1f}%" if row['bets'] > 0 else "0.0%"
         k_u_str = f"{row['kelly_units']:+.2f}u" if row['bets'] > 0 else "0.00u"
         k_roi_str = f"{row['kelly_roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
-        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8} | {k_u_str:>8} | {k_roi_str:>9}")
+        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8} | {tie_str:>7} | {k_u_str:>8} | {k_roi_str:>9}")
 
     print("-" * 94)
     g_bets = guard_metrics['bets']
@@ -701,6 +735,12 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
         print(f"Warning: Could not write to $GITHUB_STEP_SUMMARY: {exc}")
 
 
+SCORECARD_HEADER = (
+    "Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %",
+    "CLV Tie %", "Avg CLV Pts", "Avg CLV Win Prob", "Kelly Units", "Kelly ROI %",
+)
+
+
 def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
     """Writes or overwrites the Model_Scorecard tab in Google Sheets."""
     now_utc_str = datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -713,7 +753,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
 
     # Section 1: Summary Table
     rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", "", "", ""])
-    rows.append(["Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %", "CLV Tie %", "Avg CLV Pts", "Avg CLV Win Prob", "Kelly Units", "Kelly ROI %"])
+    rows.append(list(SCORECARD_HEADER))
 
     for r in summary_rows:
         rows.append([
@@ -744,11 +784,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             "-",
             f"Would PnL: {guard_metrics['units']:+.2f}u",
             f"Saved: {saved:+.2f}u",
-            "-",
-            "-",
-            "-",
-            "-",
-        ])
+        ] + ["-"] * (len(SCORECARD_HEADER) - 7))
 
     rows.append([""])
     rows.append([""])
