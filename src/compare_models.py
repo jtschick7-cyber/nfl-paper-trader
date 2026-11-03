@@ -126,7 +126,26 @@ def closing_reference_line(row):
     return consensus if consensus is not None else safe_float(row.get("closing_line"))
 
 
-def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None):
+def bet_week(row, game_id):
+    """Week from the sheet row, falling back to the game_id (e.g. 2026_10_DAL_IND -> 10)."""
+    week = safe_int(row.get("week"))
+    if week is None:
+        parts = str(game_id or "").split("_")
+        week = safe_int(parts[1]) if len(parts) > 1 else None
+    return week
+
+
+def weekly_clv_prob(clv_evaluated):
+    """Average CLV win probability (in %) per week, over bets with a recorded close."""
+    by_week = {}
+    for b in clv_evaluated:
+        if b.get("week") is None or b.get("clv_prob") is None:
+            continue
+        by_week.setdefault(int(b["week"]), []).append(b["clv_prob"])
+    return {w: sum(p) / len(p) * 100.0 for w, p in sorted(by_week.items())}
+
+
+def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None, week=None):
     """Grades a single spread bet and calculates realized CLV."""
     side = str(side).strip().upper()
     line = float(line)
@@ -170,6 +189,7 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
 
     return {
         "game_id": game_id,
+        "week": week,
         "result": result,
         "units": units,
         "kelly_stake": round(k_stake, 2),
@@ -201,6 +221,10 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
             "clv_tie_pct": 0.0,
             "avg_clv": 0.0,
             "avg_clv_prob_pct": 0.0,
+            "weekly_clv_prob_pct": {},
+            "clv_weeks": 0,
+            "clv_positive_weeks": 0,
+            "clv_positive_week_pct": 0.0,
         }
 
     wins = sum(1 for b in graded_bets if b["result"] == "WIN")
@@ -228,7 +252,9 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         avg_clv = sum(b["clv_points"] for b in clv_evaluated) / len(clv_evaluated)
         probs = [b["clv_prob"] for b in clv_evaluated if b.get("clv_prob") is not None]
         avg_clv_prob_pct = (sum(probs) / len(probs) * 100.0) if probs else 0.0
+        weekly = weekly_clv_prob(clv_evaluated)
     else:
+        weekly = {}
         clv_beat_pct = 0.0
         clv_tie_pct = 0.0
         avg_clv = 0.0
@@ -248,6 +274,11 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "clv_tie_pct": round(clv_tie_pct, 1),
         "avg_clv": round(avg_clv, 2),
         "avg_clv_prob_pct": round(avg_clv_prob_pct, 2),
+        # Promotion rule condition 3: share of weeks with a positive Avg CLV Win Prob
+        "weekly_clv_prob_pct": {w: round(v, 2) for w, v in weekly.items()},
+        "clv_weeks": len(weekly),
+        "clv_positive_weeks": sum(1 for v in weekly.values() if v > 0),
+        "clv_positive_week_pct": round(sum(1 for v in weekly.values() if v > 0) / len(weekly) * 100.0, 1) if weekly else 0.0,
     }
 
 
@@ -343,6 +374,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    week=bet_week(row, gid),
                 )
                 v1_bets.append(g)
 
@@ -371,6 +403,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    week=bet_week(row, gid),
                 )
                 v2_bets.append(g)
 
@@ -402,6 +435,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    week=bet_week(row, gid),
                     stake_units=v3_stakes.get(gid),
                 )
 
@@ -437,6 +471,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     away_score=sc["away_score"],
                     closing_line=closing_map.get(gid),
                     game_id=gid,
+                    week=bet_week(row, gid),
                     stake_units=safe_float(row.get("v4_stake_units")),
                 )
 
@@ -646,6 +681,19 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
     return pd.DataFrame(slate_rows)
 
 
+def weekly_clv_table(summary_rows):
+    """Header + one row per model: positive weeks, then Avg CLV Win Prob for each week."""
+    weeks = sorted({w for r in summary_rows for w in r.get("weekly_clv_prob_pct", {})})
+    header = ["Model", "Tier", "Weeks +"] + [f"Wk {w}" for w in weeks]
+    rows = []
+    for r in summary_rows:
+        weekly = r.get("weekly_clv_prob_pct", {})
+        n = r.get("clv_weeks", 0)
+        pos = f"{r.get('clv_positive_weeks', 0)}/{n} ({r.get('clv_positive_week_pct', 0.0):.0f}%)" if n else "-"
+        rows.append([r["model"], r["tier"], pos] + [f"{weekly[w]:+.2f}%" if w in weekly else "-" for w in weeks])
+    return header, rows
+
+
 def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
     """Renders a clean CLI dashboard."""
     print("\n" + "=" * 94)
@@ -674,6 +722,12 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
     else:
         print(f"{'Guard Suppressed Bets (Saved)':<35} | 0     | 0W - 0L - 0P   | No completed games with suppressed danger yet.")
     print("=" * 94)
+
+    w_header, w_rows = weekly_clv_table(summary_rows)
+    print("\nWEEKLY AVG CLV WIN PROB (promotion rule: positive in >= 60% of weeks bet)")
+    print(" | ".join([f"{w_header[0]:<35}", f"{w_header[2]:<12}"] + [f"{h:>7}" for h in w_header[3:]]))
+    for wr in w_rows:
+        print(" | ".join([f"{wr[0]:<35}", f"{wr[2]:<12}"] + [f"{v:>7}" for v in wr[3:]]))
 
     # Active week slate
     if not slate_df.empty:
@@ -789,7 +843,16 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
     rows.append([""])
     rows.append([""])
 
-    # Section 2: Active Slate
+    # Section 2: Weekly CLV (promotion rule condition 3)
+    w_header, w_rows = weekly_clv_table(summary_rows)
+    rows.append(["WEEKLY AVG CLV WIN PROB (promotion rule: positive in >= 60% of weeks bet)"])
+    rows.append(w_header)
+    rows.extend(w_rows)
+
+    rows.append([""])
+    rows.append([""])
+
+    # Section 3: Active Slate
     rows.append(["ACTIVE SLATE HEAD-TO-HEAD MATRIX", "", "", "", "", "", "", "", ""])
     rows.append(["Week", "Matchup", "Kickoff (UTC)", "Market Spread", "v1 Baseline", "v2 Elo/Rest", "v3 EPA-Enhanced", "v4 Full Matrix", "Consensus"])
 
