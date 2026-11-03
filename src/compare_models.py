@@ -251,6 +251,19 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
     }
 
 
+def first_priced_decision(df, line_col):
+    """
+    Keeps each game's first logged evaluation that carries a line. Rows logged before the
+    opening line existed have a blank line; keeping them as the "first" decision would
+    discard the real Tuesday evaluation.
+    """
+    if df is None or df.empty or "game_id" not in df.columns:
+        return df
+    if line_col in df.columns:
+        df = df[df[line_col].map(lambda v: safe_float(v) is not None)]
+    return df.drop_duplicates(subset=["game_id"], keep="first")
+
+
 def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4).
 
@@ -260,10 +273,8 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     """
     if v2_df is not None and not v2_df.empty and "game_id" in v2_df.columns:
         v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="first")
-    if v3_df is not None and not v3_df.empty and "game_id" in v3_df.columns:
-        v3_df = v3_df.drop_duplicates(subset=["game_id"], keep="first")
-    if v4_df is not None and not v4_df.empty and "game_id" in v4_df.columns:
-        v4_df = v4_df.drop_duplicates(subset=["game_id"], keep="first")
+    v3_df = first_priced_decision(v3_df, "v3_best_line")
+    v4_df = first_priced_decision(v4_df, "v4_best_line")
 
     closing_map = {}
     master_by_gid = {}
