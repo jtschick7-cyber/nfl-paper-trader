@@ -105,3 +105,59 @@ def test_console_table_shows_clv_tie_pct(capsys):
     assert "CLV Tie" in cols
     assert vals[cols.index("CLV Tie")] == "50.0%"
     assert len(vals) == len(cols)
+
+
+def test_weekly_clv_counts_positive_weeks_with_a_close():
+    bets = [
+        cm.grade_single_bet("HOME", -3.0, -110, 24, 20, closing_line=-3.5, week=9),   # beat
+        cm.grade_single_bet("HOME", -3.0, -110, 24, 20, closing_line=-3.0, week=9),   # tie
+        cm.grade_single_bet("HOME", -3.5, -110, 24, 20, closing_line=-3.0, week=10),  # lose
+        cm.grade_single_bet("AWAY", 7.5, -110, 24, 20, closing_line=-7.0, week=11),   # beat
+        cm.grade_single_bet("HOME", -3.0, -110, 24, 20, closing_line=None, week=12),  # no close
+    ]
+    m = cm.compute_metrics(bets, "test")
+    assert sorted(m["weekly_clv_prob_pct"]) == [9, 10, 11]
+    assert m["weekly_clv_prob_pct"][9] == pytest.approx(bets[0]["clv_prob"] * 50.0, abs=0.01)
+    assert m["weekly_clv_prob_pct"][10] < 0 < m["weekly_clv_prob_pct"][11]
+    assert m["clv_weeks"] == 3
+    assert m["clv_positive_weeks"] == 2
+    assert m["clv_positive_week_pct"] == pytest.approx(66.7)
+
+    empty = cm.compute_metrics([], "none")
+    assert empty["clv_weeks"] == 0 and empty["weekly_clv_prob_pct"] == {}
+
+
+def test_bet_week_falls_back_to_game_id():
+    assert cm.bet_week({"week": "9"}, "2026_10_DAL_IND") == 9
+    assert cm.bet_week({}, "2026_10_DAL_IND") == 10
+    assert cm.bet_week({}, "bad") is None
+
+
+def test_graded_shadow_bets_carry_week():
+    row = _v3_pick("2026_10_DAL_IND", "0.60")
+    del row["week"]
+    scores = {"2026_10_DAL_IND": {"home_score": 24, "away_score": 21}}
+    master = pd.DataFrame([{"game_id": "2026_10_DAL_IND", "closing_line": -4.0}])
+    summary_rows, _, _ = cm.evaluate_all_models(master, pd.DataFrame(), pd.DataFrame([row]), scores)
+    v3 = next(r for r in summary_rows if r["model"].startswith("Model v3 (EPA"))
+    assert list(v3["weekly_clv_prob_pct"]) == [10]
+
+
+def test_sheet_has_weekly_clv_section(monkeypatch):
+    ws = _FakeWorksheet()
+    monkeypatch.setattr(cm, "get_or_create_worksheet", lambda _name: ws)
+    bets = [
+        cm.grade_single_bet("HOME", -3.0, -110, 24, 20, closing_line=-3.5, week=9),
+        cm.grade_single_bet("HOME", -3.5, -110, 24, 20, closing_line=-3.0, week=10),
+    ]
+    summary = [cm.compute_metrics(bets, "Model v1 (Master_Bets Baseline)")]
+    guard = cm.compute_metrics([], "Guard", "Hypothetical Placed")
+
+    cm.write_google_sheet_scorecard(summary, guard, pd.DataFrame())
+
+    title_idx = next(i for i, r in enumerate(ws.values) if r and str(r[0]).startswith("WEEKLY AVG CLV WIN PROB"))
+    assert ws.values[title_idx + 1] == ["Model", "Tier", "Weeks +", "Wk 9", "Wk 10"]
+    row = ws.values[title_idx + 2]
+    assert row[0] == "Model v1 (Master_Bets Baseline)"
+    assert row[2] == "1/2 (50%)"
+    assert row[3].startswith("+") and row[4].startswith("-")

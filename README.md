@@ -43,7 +43,7 @@ A shadow model (v2, v3 or v4) replaces v1 only if all of these hold at a weekly 
 5. **Profit is reported but not required.** At 40 bets it's mostly noise.
 6. **Timing:** if two models qualify, the one with the higher Avg CLV Win Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
 
-Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average change in cover probability between the line taken and the closing line. The scorecard reports it for the whole season only, so condition 3 is checked by hand for now.
+Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average change in cover probability between the line taken and the closing line. For condition 3, the scorecard's **Weekly Avg CLV Win Prob** table shows each model's average by week and its positive weeks (`Weeks +`); only weeks with at least one bet that has a recorded close count.
 
 ---
 
