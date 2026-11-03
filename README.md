@@ -34,6 +34,17 @@ Edge is the calibrated cover probability minus the break-even probability of the
 - **Reverse line movement**: lines moving ≥ 1.5 points against the pick side are suppressed and flagged `RLM_ALERT` at close.
 - **Model–market divergence**: a model margin more than 7 points from the line is treated as an unmodeled injury or weather shock and not auto-bet.
 
+### Promoting a shadow model to live
+A shadow model (v2, v3 or v4) replaces v1 only if all of these hold at a weekly checkpoint (after the Tuesday scorecard):
+1. **Sample:** at least **40 graded bets with a recorded close**, across at least **6 different weeks**.
+2. **Beats the close:** **Avg CLV Win Prob ≥ +0.5%** over all those bets.
+3. **Holds up week to week:** Avg CLV Win Prob is positive in **at least 60% of the weeks** it bet.
+4. **Beats v1:** its Avg CLV Win Prob is at least **0.5 points higher than v1's** over the same weeks.
+5. **Profit is reported but not required.** At 40 bets it's mostly noise.
+6. **Timing:** if two models qualify, the one with the higher Avg CLV Win Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
+
+Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average change in cover probability between the line taken and the closing line. The scorecard reports it for the whole season only, so condition 3 is checked by hand for now.
+
 ---
 
 ## 📊 Google Sheet
