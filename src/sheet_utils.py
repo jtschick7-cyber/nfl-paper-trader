@@ -6,6 +6,7 @@ import time
 import gspread
 import numpy as np
 import pandas as pd
+import requests
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
@@ -19,6 +20,14 @@ SCOPES = [
 _cached_client = None
 _cached_spreadsheet = None
 _worksheet_cache = {}
+
+
+def is_transient_network_error(exc) -> bool:
+    """True for dropped/timed-out connections (e.g. 'Connection reset by peer')."""
+    return isinstance(
+        exc,
+        (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError, TimeoutError),
+    )
 
 
 def to_native(value):
@@ -80,7 +89,7 @@ def get_spreadsheet():
         raise ValueError("SPREADSHEET_ID environment variable is missing.")
 
     client = get_gspread_client()
-    _cached_spreadsheet = client.open_by_key(sheet_id)
+    _cached_spreadsheet = retry_api_call(client.open_by_key, sheet_id)
     return _cached_spreadsheet
 
 
@@ -105,7 +114,9 @@ def get_or_create_worksheet(title: str, rows: str = "5000", cols: str = "50"):
             _worksheet_cache[title] = ws
             return ws
         except Exception as exc:
-            if attempt < max_attempts and ("429" in str(exc) or "Quota" in str(exc)):
+            if attempt < max_attempts and (
+                "429" in str(exc) or "Quota" in str(exc) or is_transient_network_error(exc)
+            ):
                 time.sleep(delay_seconds * attempt)
                 continue
             raise
@@ -141,6 +152,7 @@ def retry_api_call(fn, *args, max_attempts=5, delay_seconds=5, **kwargs):
                 "429" in error_text
                 or "Quota exceeded" in error_text
                 or "rate limit" in error_text.lower()
+                or is_transient_network_error(exc)
             )
             if retryable and attempt < max_attempts:
                 sleep_for = delay_seconds * attempt
@@ -282,6 +294,7 @@ def batch_update_cells(ws, updates, chunk_size=200):
                     "429" in error_text
                     or "Quota exceeded" in error_text
                     or "rate limit" in error_text.lower()
+                    or is_transient_network_error(exc)
                 )
 
                 if retryable and attempt < max_attempts:
