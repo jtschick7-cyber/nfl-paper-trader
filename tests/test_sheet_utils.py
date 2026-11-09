@@ -39,3 +39,34 @@ def test_verify_row_game_ids_drops_rows_that_moved():
     ws = FakeWS([], 0, gids=["game_id", "A", "B"])
     assert verify_row_game_ids(ws, {2: "A", 3: "X", 9: "Z"}, 1) == {2}
     assert verify_row_game_ids(ws, {}, 1) == set()
+
+
+def test_retry_api_call_retries_connection_reset(monkeypatch):
+    import requests
+    from src import sheet_utils
+
+    monkeypatch.setattr(sheet_utils.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise requests.exceptions.ConnectionError("Connection reset by peer")
+        return "ok"
+
+    assert sheet_utils.retry_api_call(flaky) == "ok"
+    assert calls["n"] == 3
+
+
+def test_retry_api_call_gives_up_after_max_attempts(monkeypatch):
+    import pytest
+    import requests
+    from src import sheet_utils
+
+    monkeypatch.setattr(sheet_utils.time, "sleep", lambda _s: None)
+
+    def always():
+        raise requests.exceptions.ConnectionError("reset")
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        sheet_utils.retry_api_call(always, max_attempts=3)
