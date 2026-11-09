@@ -2,7 +2,9 @@ name: Nightly Results
 
 on:
   schedule:
-    - cron: "17 5 * * *"
+    # GitHub often starts scheduled runs hours late. Backup firings are safe: settling is
+    # status-gated (SETTLED rows are skipped) and the sheet-writer group serializes runs.
+    - cron: "17 5,9,13 * * *"
   workflow_dispatch:
 
 permissions:
