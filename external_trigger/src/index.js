@@ -11,14 +11,14 @@ export const SCHEDULE = {
   // Nightly results: settle finished games.
   "17 5 * * *": ["nightly_results.yml"],
   // Tuesday opening capture, picks and shadow logs.
-  "17 15 * * 2": ["tuesday_opening.yml"],
+  "17 15 * * TUE": ["tuesday_opening.yml"],
   // Closing-line loop on Mon/Thu/Fri/Sat. Each run sleeps until its kickoff
   // targets for up to 320 min and exits at once when there are none, so the
   // 13:30 and 17:30 starts only matter for afternoon games (Thanksgiving,
   // Christmas, Saturdays late in the season).
-  "30 13,17,21 * * 1,4,5,6": ["closing_line_monitor.yml"],
+  "30 13,17,21 * * MON,THU,FRI,SAT": ["closing_line_monitor.yml"],
   // Sunday closing loop: London games, 1pm/4pm ET slates, then SNF.
-  "30 10,15,20 * * 0": ["closing_line_monitor.yml"],
+  "30 10,15,20 * * SUN": ["closing_line_monitor.yml"],
 };
 
 const API = "https://api.github.com";

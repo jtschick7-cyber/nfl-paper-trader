@@ -70,7 +70,17 @@ test("dispatch does not retry auth errors", async () => {
 
 test("runCron dispatches the mapped workflow and rejects unknown crons", async () => {
   const f = fakeFetch([204]);
-  await runCron("17 15 * * 2", env, f);
+  await runCron("17 15 * * TUE", env, f);
   assert.match(f.calls[0].url, /tuesday_opening\.yml/);
   await assert.rejects(runCron("0 0 * * *", env, f), /No workflows/);
+});
+
+test("day-of-week fields use names, not numbers", () => {
+  // Cloudflare numbers weekdays 1=Sunday..7=Saturday and rejects 0, unlike
+  // GitHub/Unix cron (0=Sunday). Names mean the same thing on both.
+  for (const cron of Object.keys(SCHEDULE)) {
+    const fields = cron.trim().split(/\s+/);
+    assert.equal(fields.length, 5, `${cron}: expected 5 fields`);
+    assert.match(fields[4], /^(\*|(SUN|MON|TUE|WED|THU|FRI|SAT)(,(SUN|MON|TUE|WED|THU|FRI|SAT))*)$/, cron);
+  }
 });
