@@ -27,3 +27,6 @@ jobs:
 
       - name: Run pytest test suite
         run: pytest tests/ -v
+
+      - name: Run external trigger tests
+        run: node --test 'external_trigger/test/*.test.js'
