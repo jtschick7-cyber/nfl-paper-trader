@@ -12,12 +12,12 @@ concurrency groups queue rather than overlap.
 | Cron (UTC) | Workflow | Why |
 |---|---|---|
 | `17 5 * * *` | `nightly_results.yml` | Settle finished games |
-| `17 15 * * 2` | `tuesday_opening.yml` | Tuesday opening capture + picks + shadow logs |
-| `30 13,17,21 * * 1,4,5,6` | `closing_line_monitor.yml` | Mon/Thu/Fri/Sat closing loop (exits at once if no games) |
-| `30 10,15,20 * * 0` | `closing_line_monitor.yml` | Sunday: London, 1pm/4pm ET slates, SNF |
+| `17 15 * * TUE` | `tuesday_opening.yml` | Tuesday opening capture + picks + shadow logs |
+| `30 13,17,21 * * MON,THU,FRI,SAT` | `closing_line_monitor.yml` | Mon/Thu/Fri/Sat closing loop (exits at once if no games) |
+| `30 10,15,20 * * SUN` | `closing_line_monitor.yml` | Sunday: London, 1pm/4pm ET slates, SNF |
 
 Edit `SCHEDULE` in `src/index.js` and `crons` in `wrangler.toml` together;
-`npm test` fails if they drift. The free Cloudflare plan allows 5 cron triggers per Worker.
+`npm test` fails if they drift. Write weekdays as names (`SUN`, `MON`, ...): Cloudflare numbers them 1=Sunday..7=Saturday, unlike GitHub's 0=Sunday, and rejects 0. The free Cloudflare plan allows 5 cron triggers per Worker.
 
 ## One-time setup (you do these; they need your accounts)
 
