@@ -75,6 +75,9 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
 | `ci_tests.yml` | Push / PR to `main` | `pytest tests/` |
 
+### On-time starts (`external_trigger/`)
+GitHub's `schedule:` triggers start hours late and skip firings, so a Cloudflare Worker calls `workflow_dispatch` for the nightly, Tuesday and closing workflows at fixed UTC times. The GitHub crons stay as a backup; duplicate starts are safe. Setup and schedule: [`external_trigger/README.md`](external_trigger/README.md).
+
 ### Self-pacing closing loop (`src/closing_loop.py`)
 GitHub drops most dense cron triggers on busy days, so the closing monitor does not rely on a fixed cadence. Whichever cron run fires first stays alive (up to `CLOSING_LOOP_MAX_MINUTES`, default 320) and sleeps until fixed leads before each kickoff (`CLOSING_WAKE_LEADS`, default 45 and 10 minutes), capturing then. `src/capture_closing.py` captures any missing close 240–2 minutes before kickoff and upgrades an early capture once inside the last hour, after inactives. Games missed entirely are recovered by the nightly run from pre-kickoff snapshots in the odds cache.
 

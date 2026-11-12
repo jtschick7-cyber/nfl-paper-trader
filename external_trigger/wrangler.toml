@@ -1,0 +1,20 @@
+name = "nfl-paper-trader-trigger"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Cron-only Worker: no public URL.
+workers_dev = false
+
+[vars]
+GITHUB_REPO = "jtschick7-cyber/nfl-paper-trader"
+GITHUB_REF = "main"
+# GITHUB_TOKEN is a secret: `npx wrangler secret put GITHUB_TOKEN`
+
+# All times UTC. Keep in sync with SCHEDULE in src/index.js.
+[triggers]
+crons = [
+  "17 5 * * *",
+  "17 15 * * 2",
+  "30 13,17,21 * * 1,4,5,6",
+  "30 10,15,20 * * 0",
+]
