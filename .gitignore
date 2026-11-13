@@ -20,3 +20,4 @@ chat-export*.json
 .claude/handoff_pinned.md
 .claude/settings.local.json
 .claude/worktrees/
+data/sheet_dump/
