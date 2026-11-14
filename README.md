@@ -56,6 +56,15 @@ Only the scorecard's **in-week** block counts: v1 bets with `decision_regime = i
 
 **How much 40 bets can tell you.** The per-bet CLV has a standard deviation of about 5.5 points, so the standard error of a 40-bet average is about 0.9 points: 40 bets cannot separate a true +0.5% from zero. Read conditions 2 and 4 together with the SE column; the thresholds themselves are the owner's call and have not been changed.
 
+### Raw-lean tracking (evaluation only)
+The shadow models almost never clear the 2% edge, so their bets say little. The **raw lean** can be graded on every game: `raw_lean_pts = raw_mu_home_margin - market_mu`, where `raw_mu_home_margin` is the model's margin before `blend_margin` (v2's ordinary margin) and `market_mu = -home_line`. Positive leans home; `raw_lean_side` is `HOME`, `AWAY`, or blank at exactly 0. It is never taken from `v*_best_side`, which follows price and line number and disagrees with the lean on most v3/v4 rows.
+
+The scorecard's **Raw lean CLV** section (last on `Model_Scorecard`) tickets the lean side at the row's opening line and price, on each model's first row per game with a recorded close, and grades it with Avg CLV Fair Prob (line-only where closing prices are missing; the fallback count is shown). Per model, for all leans and for |lean| ≥ 1.5 points: games, mean, SE, t, share positive, mean lean, and two baselines on the same games, **always home** (with the paired difference, its SE and t) and **always underdog** (pick'em skipped). Models are not summed: their leans share features. A legacy block below does not count.
+
+> **Raw-lean test, registered 2026-11-13.** Primary: v3, all in-week leans, price-aware CLV. The lean carries information if, with at least 100 graded lean-games, the mean paired difference against the always-home baseline has t ≥ 2. Everything else in the raw-lean section (v2, v4, the ≥ 1.5-point cut, the always-underdog comparison) is descriptive and decides nothing. No change to β, the 2% threshold or the live model is made from this table during the 2026 season; a pass means the model earns a re-fit in the offseason.
+
+Accepted by the owner as written on 2026-11-14. About 109 regular-season games remained when it was written, so this season can show an effect of roughly a point or more, not half a point. Over 2012–2025 the v3 raw lean covered 49.8% against the close (n = 2,974); what this measures is whether the lean predicts the move from the in-week open to the close.
+
 ---
 
 ## 📊 Google Sheet
@@ -64,7 +73,7 @@ Only the scorecard's **in-week** block counts: v1 bets with `decision_regime = i
 2. **`V2_Shadow`**, **`V3_Shadow`**, **`V4_Shadow`**: shadow evaluations for each model.
 3. **`Model_Scorecard`**: side-by-side record, units, ROI, CLV beat/tie/lose shares (each over all bets with a close, so they sum to 100%), average CLV in points, in win probability and price-aware (with its standard error), plus the active-slate head-to-head matrix. An in-week block (the promotion sample) comes first and a legacy block below it. Each model is graded on its **first** logged decision per game within each block. "Guard suppressed" counts only `SUPPRESS_DANGER` rows whose edge cleared `MIN_EDGE_THRESHOLD`; the loggers now record `PASS` below the threshold whatever the guard says.
 
-Shadow tabs end with `artifact_id` (training span plus the first 8 hex characters of the `.pkl` sha256, e.g. `v3_2012-2025_1a2b3c4d`) and `decision_regime`. Loggers add missing header cells with `ensure_tab_headers` (`src/sheet_utils.py`), which appends to an existing header row but never rewrites it and stops if the row is not a prefix of the expected headers.
+Shadow tabs end with `artifact_id` (training span plus the first 8 hex characters of the `.pkl` sha256, e.g. `v3_2012-2025_1a2b3c4d`) and `decision_regime`, then (R3) `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side`, written to 4 decimals. Rows logged before R3 were filled by `src/backfill_raw_leans.py`: v2 copies `mu_home_margin`; v3 and v4 invert the blend with the artifact's β; pre-fix v3 rows (`sigma` 13.2147) are skipped; v4 logged `mu` to 2 decimals (±0.12 pts), so its side is left blank where the logged deviation from the market is under 0.01. Loggers add missing header cells with `ensure_tab_headers` (`src/sheet_utils.py`), which appends to an existing header row but never rewrites it and stops if the row is not a prefix of the expected headers.
 
 ### Closing line and CLV columns (`Master_Bets`)
 | Column | Meaning |
@@ -89,6 +98,7 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 | `nightly_results.yml` | Daily 05:17 | Catch up missed closes from cached snapshots, settle results, scorecard |
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
 | `migrate_lookahead_openers.yml` | Manual, one-off | R1 migration: move look-ahead openers for a later week out of the opening columns (dry run unless `apply` is ticked) |
+| `backfill_raw_leans.yml` | Manual, one-off | R3: fill the three raw-lean columns on existing shadow rows where blank (dry run unless `apply` is ticked) |
 | `ci_tests.yml` | Push / PR to `main` | `pytest tests/` |
 
 ### On-time starts (`external_trigger/`)
