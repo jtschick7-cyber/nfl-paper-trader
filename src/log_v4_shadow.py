@@ -40,6 +40,7 @@ from src.odds_utils import (
     remove_vig,
 )
 from src.artifacts import artifact_id as build_artifact_id
+import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
 from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.staking import cap_slate_stakes, compute_push_aware_stake
@@ -483,20 +484,19 @@ def run_v4_shadow_evaluations():
 
         X = np.array([[feat_vals[c] for c in feature_columns]], dtype=float)
         mu = float(ridge.predict(scaler.transform(X))[0])
-        raw_lean = raw_lean_cells(mu, home_line)  # 4 decimals, before the blend overwrites mu
-        # Anchor on the market line; move off it only by the OOS-fitted share (beta)
-        if market_beta is not None:
-            mu = blend_margin(mu, home_line, market_beta)
-
-        # Discrete key-number spread probabilities conditioned on game total
-        spread_res = calculate_spread_probabilities(mu, sigma_base, home_line, total_line=total_line)
-        p_home_discrete = float(spread_res["cond_home_win"])
-        p_push = float(spread_res["p_push"])
-        sigma_adj = float(spread_res.get("sigma", sigma_base))
-
-        # Probability calibration
-        p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
-        p_away_cal = 1.0 - p_home_cal
+        raw_lean = raw_lean_cells(mu, home_line)  # 4 decimals, before the blend
+        # Blend toward the market by beta, total-conditioned key-number probabilities,
+        # calibrate, break-even edges (src/decision.py)
+        dec = game_decision.shadow_decision(
+            mu, home_line, home_odds, away_odds,
+            sigma=sigma_base, market_beta=market_beta, calibrator=calibrator, total_line=total_line,
+        )
+        mu = dec["mu_blend"]
+        p_home_discrete = dec["p_home_discrete"]
+        p_push = dec["p_push"]
+        sigma_adj = dec["sigma_adj"]
+        p_home_cal = dec["p_home_cal"]
+        p_away_cal = dec["p_away_cal"]
 
         # Market vig removal
         implied_h = american_to_implied_prob(home_odds)
@@ -510,27 +510,15 @@ def run_v4_shadow_evaluations():
             except Exception:
                 pass
 
-        # Edge is measured against the break-even probability of the price actually
-        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
-        edge_h = p_home_cal - american_to_implied_prob(home_odds)
-        edge_a = p_away_cal - american_to_implied_prob(away_odds)
-
-        if edge_h >= edge_a:
-            best_team = home
-            best_side = "HOME"
-            best_line = home_line
-            best_odds = home_odds
-            best_model_prob = p_home_cal
-            best_fair_prob = fair_h
-            best_edge = edge_h
-        else:
-            best_team = away
-            best_side = "AWAY"
-            best_line = -home_line
-            best_odds = away_odds
-            best_model_prob = p_away_cal
-            best_fair_prob = fair_a
-            best_edge = edge_a
+        edge_h = dec["edge_home"]
+        edge_a = dec["edge_away"]
+        best_side = dec["best_side"]
+        best_team = home if best_side == "HOME" else away
+        best_line = dec["best_line"]
+        best_odds = dec["best_odds"]
+        best_model_prob = dec["best_model_p"]
+        best_fair_prob = fair_h if best_side == "HOME" else fair_a
+        best_edge = dec["best_edge"]
 
         # Push-aware Kelly sizing
         uncond_win_prob = best_model_prob * (1.0 - p_push)

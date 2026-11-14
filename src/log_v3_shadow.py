@@ -37,6 +37,7 @@ from src.odds_utils import (
     remove_vig,
 )
 from src.artifacts import artifact_id as build_artifact_id
+import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
 from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
@@ -409,27 +410,17 @@ def main():
 
         X = np.array([[feat_vals[c] for c in feature_columns]], dtype=float)
         mu = float(ridge.predict(scaler.transform(X))[0])
-        raw_lean = raw_lean_cells(mu, home_line)  # before the blend overwrites mu
-        # Anchor on the market line; move off it only by the OOS-fitted share (beta)
-        if market_beta is not None:
-            mu = blend_margin(mu, home_line, market_beta)
-
-        # Discrete key-number aware spread probabilities
-        spread_res = calculate_spread_probabilities(mu, sigma, home_line)
-        p_home_discrete = float(spread_res["cond_home_win"])
-        p_push = float(spread_res["p_push"])
-
-        # Probability Calibration
-        if isinstance(calibrator, tuple):
-            p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
-        elif hasattr(calibrator, "predict_proba"):
-            try:
-                p_home_cal = float(calibrator.predict_proba([[p_home_discrete]])[0][1])
-            except Exception:
-                p_home_cal = p_home_discrete
-        else:
-            p_home_cal = p_home_discrete
-        p_away_cal = 1.0 - p_home_cal
+        raw_lean = raw_lean_cells(mu, home_line)  # before the blend
+        # Blend toward the market by beta, key-number probabilities, calibrate, break-even edges
+        dec = game_decision.shadow_decision(
+            mu, home_line, home_odds, away_odds,
+            sigma=sigma, market_beta=market_beta, calibrator=calibrator,
+        )
+        mu = dec["mu_blend"]
+        p_home_discrete = dec["p_home_discrete"]
+        p_push = dec["p_push"]
+        p_home_cal = dec["p_home_cal"]
+        p_away_cal = dec["p_away_cal"]
 
         # Fair no-vig probabilities
         fair_h, fair_a = remove_vig(
@@ -445,27 +436,16 @@ def main():
             except Exception:
                 pass
 
-        # Edge is measured against the break-even probability of the price actually
-        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
-        edge_home = p_home_cal - american_to_implied_prob(home_odds)
-        edge_away = p_away_cal - american_to_implied_prob(away_odds)
-
-        if edge_home >= edge_away:
-            best_side = "HOME"
-            best_team = home
-            best_line = home_line
-            best_odds = home_odds
-            best_model_p = p_home_cal
-            best_fair_p = fair_h
-            best_edge = edge_home
-        else:
-            best_side = "AWAY"
-            best_team = away
-            best_line = -home_line
-            best_odds = away_odds
-            best_model_p = p_away_cal
-            best_fair_p = fair_a
-            best_edge = edge_away
+        # Edges are against the break-even probability of the price taken (src/decision.py)
+        edge_home = dec["edge_home"]
+        edge_away = dec["edge_away"]
+        best_side = dec["best_side"]
+        best_team = home if best_side == "HOME" else away
+        best_line = dec["best_line"]
+        best_odds = dec["best_odds"]
+        best_model_p = dec["best_model_p"]
+        best_fair_p = fair_h if best_side == "HOME" else fair_a
+        best_edge = dec["best_edge"]
 
         # Pre-bet integrity audit (with active line comparison)
         curr_line = home_line

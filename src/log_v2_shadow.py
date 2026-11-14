@@ -25,6 +25,7 @@ from src.model_v2_core import (
 )
 from src.odds_utils import get_cached_live_home_spread
 from src.artifacts import artifact_id as build_artifact_id
+import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
 from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.v2_sheet_utils import get_or_create_worksheet
@@ -330,40 +331,31 @@ def main():
         mu = float(ridge.predict(scaler.transform(X))[0])
         raw_lean = raw_lean_cells(mu, home_line)  # v2 has no blend: raw = mu
 
-        # Discrete key-number aware win probability (weights spikes at 3, 7, 6, 10)
-        spread_res = calculate_spread_probabilities(mu, sigma, home_line)
-        p_home_discrete = float(spread_res["cond_home_win"])
+        # Key-number probabilities, calibrate, break-even edges; no blend (src/decision.py)
+        dec = game_decision.shadow_decision(
+            mu, home_line, home_odds, away_odds,
+            sigma=sigma, market_beta=None, calibrator=calibrator,
+        )
+        p_home_discrete = dec["p_home_discrete"]
         p_home_raw = p_home_discrete
 
-        p_home_cal = float(calibrate_probability(calibrator, p_home_discrete))
-        p_away_cal = 1.0 - p_home_cal
+        p_home_cal = dec["p_home_cal"]
+        p_away_cal = dec["p_away_cal"]
 
         fair_home, fair_away = remove_vig_scalar(
             american_to_implied_prob_scalar(home_odds),
             american_to_implied_prob_scalar(away_odds),
         )
 
-        # Edge is measured against the break-even probability of the price actually
-        # taken (vig included), not the no-vig fair probability, so edge > 0 means +EV.
-        edge_home = p_home_cal - american_to_implied_prob_scalar(home_odds)
-        edge_away = p_away_cal - american_to_implied_prob_scalar(away_odds)
-
-        if edge_home >= edge_away:
-            best_side = "HOME"
-            best_team = home
-            best_line = home_line
-            best_odds = home_odds
-            best_model_p = p_home_cal
-            best_fair_p = fair_home
-            best_edge = edge_home
-        else:
-            best_side = "AWAY"
-            best_team = away
-            best_line = -home_line
-            best_odds = away_odds
-            best_model_p = p_away_cal
-            best_fair_p = fair_away
-            best_edge = edge_away
+        edge_home = dec["edge_home"]
+        edge_away = dec["edge_away"]
+        best_side = dec["best_side"]
+        best_team = home if best_side == "HOME" else away
+        best_line = dec["best_line"]
+        best_odds = dec["best_odds"]
+        best_model_p = dec["best_model_p"]
+        best_fair_p = fair_home if best_side == "HOME" else fair_away
+        best_edge = dec["best_edge"]
 
         if not math.isfinite(best_edge):
             skipped_missing_features += 1
