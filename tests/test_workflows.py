@@ -10,6 +10,7 @@ SHEET_WRITERS = [
     "v2_shadow_logger.yml",
     "v3_shadow_logger.yml",
     "migrate_lookahead_openers.yml",
+    "backfill_raw_leans.yml",
 ]
 
 

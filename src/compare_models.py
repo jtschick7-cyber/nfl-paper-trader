@@ -706,6 +706,200 @@ def evaluate_regimes(master_df, v2_df, v3_df, scores, v4_df=None):
     }
 
 
+# --- R3: raw-lean CLV ---------------------------------------------------------
+# Evaluation only. The ticket is the raw-lean side at the row's opening line and price.
+# Registered test (README): v3, all in-week leans, paired difference against always-home.
+RAW_LEAN_MODELS = (("v2", "Model v2 raw lean"), ("v3", "Model v3 raw lean"), ("v4", "Model v4 raw lean"))
+RAW_LEAN_STRONG_PTS = 1.5
+RAW_LEAN_CUTS = (("all", "All leans"), ("strong", f"|lean| >= {RAW_LEAN_STRONG_PTS} pts"))
+RAW_LEAN_TEST_MIN_GAMES = 100
+RAW_LEAN_TEST_T = 2.0
+
+
+def lean_ticket_clv(side, home_line, open_home_odds, open_away_odds, master_row):
+    """
+    (clv, priced) for a ticket on `side` at the home line `home_line`, or None without a close.
+    clv is clv_fair_probability; it falls back to clv_win_probability when a price is missing.
+    """
+    if master_row is None:
+        return None
+    close_ref = closing_reference_line(master_row)
+    if close_ref is None:
+        return None
+    pick_line = home_line if side == "HOME" else -home_line
+    fair = clv_fair_probability(
+        side, pick_line, open_home_odds, open_away_odds,
+        safe_float(master_row.get("closing_line")),
+        safe_float(master_row.get("closing_odds")),
+        safe_float(master_row.get("closing_away_odds")),
+        total_line=safe_float(master_row.get("total_line")),
+    )
+    if fair is not None:
+        return fair, True
+    closing_pick_line = close_ref if side == "HOME" else -close_ref
+    return clv_win_probability(pick_line, closing_pick_line), False
+
+
+def _mean_se_t(xs):
+    """(mean, standard error, t); se is 0 and t None with fewer than two values or no spread."""
+    n = len(xs)
+    if n == 0:
+        return 0.0, 0.0, None
+    mean = sum(xs) / n
+    if n < 2:
+        return mean, 0.0, None
+    sd = math.sqrt(sum((x - mean) ** 2 for x in xs) / (n - 1))
+    se = sd / math.sqrt(n)
+    return mean, se, (mean / se if se > 0 else None)
+
+
+def _raw_lean_games(df, master_by_gid):
+    """One graded dict per game: the first row per game, with a lean side and a recorded close."""
+    games = []
+    if df is None or df.empty or "raw_lean_side" not in df.columns:
+        return games
+    for _, row in first_priced_decision(df, "home_line").iterrows():
+        side = str(row.get("raw_lean_side", "") or "").strip().upper()
+        home_line = safe_float(row.get("home_line"))
+        if side not in {"HOME", "AWAY"} or home_line is None:
+            continue
+        m = master_by_gid.get(str(row.get("game_id", "")).strip())
+        h_odds, a_odds = safe_float(row.get("home_odds")), safe_float(row.get("away_odds"))
+        lean = lean_ticket_clv(side, home_line, h_odds, a_odds, m)
+        if lean is None:
+            continue
+        home = lean_ticket_clv("HOME", home_line, h_odds, a_odds, m)
+        dog = None
+        if home_line != 0:
+            dog = lean_ticket_clv("HOME" if home_line > 0 else "AWAY", home_line, h_odds, a_odds, m)[0]
+        games.append({
+            "lean_pts": safe_float(row.get("raw_lean_pts")),
+            "clv": lean[0],
+            "priced": lean[1],
+            "home_clv": home[0],
+            "dog_clv": dog,
+        })
+    return games
+
+
+def _raw_lean_row(model_key, model_name, cut_key, cut_label, games):
+    clv = [g["clv"] for g in games]
+    mean, se, t = _mean_se_t(clv)
+    diff, diff_se, diff_t = _mean_se_t([g["clv"] - g["home_clv"] for g in games])
+    home_mean = _mean_se_t([g["home_clv"] for g in games])[0]
+    dog = [g["dog_clv"] for g in games if g["dog_clv"] is not None]
+    pts = [g["lean_pts"] for g in games if g["lean_pts"] is not None]
+    return {
+        "model_key": model_key,
+        "model": model_name,
+        "cut": cut_key,
+        "cut_label": cut_label,
+        "n": len(games),
+        "mean_pct": mean * 100.0,
+        "se_pct": se * 100.0,
+        "t": t,
+        "pos_pct": (sum(1 for c in clv if c > 0) / len(clv) * 100.0) if clv else 0.0,
+        "mean_lean_pts": (sum(pts) / len(pts)) if pts else 0.0,
+        "fallback": sum(1 for g in games if not g["priced"]),
+        "home_mean_pct": home_mean * 100.0,
+        "diff_pct": diff * 100.0,
+        "diff_se_pct": diff_se * 100.0,
+        "diff_t": diff_t,
+        "dog_n": len(dog),
+        "dog_mean_pct": (sum(dog) / len(dog) * 100.0) if dog else 0.0,
+    }
+
+
+def evaluate_raw_leans(master_df, shadow_dfs, regime=IN_WEEK):
+    """
+    Raw-lean CLV rows per model and cut. shadow_dfs = {'v2': df, 'v3': df, 'v4': df}.
+    Baselines (always home, always underdog) are graded on exactly the lean games. Models
+    are never pooled: their leans share features and are correlated.
+    """
+    if master_df is None:
+        master_df = pd.DataFrame()
+    regimes = master_regime_map(master_df)
+    master_by_gid = {}
+    if not master_df.empty and "game_id" in master_df.columns:
+        for _, row in master_df.iterrows():
+            gid = str(row.get("game_id", "")).strip()
+            if gid:
+                master_by_gid[gid] = row
+
+    rows = []
+    for key, name in RAW_LEAN_MODELS:
+        df = shadow_dfs.get(key)
+        if df is not None and not df.empty:
+            df = filter_regime(df, regime, regimes)
+        games = _raw_lean_games(df, master_by_gid)
+        for cut_key, cut_label in RAW_LEAN_CUTS:
+            sel = games if cut_key == "all" else [
+                g for g in games if g["lean_pts"] is not None and abs(g["lean_pts"]) >= RAW_LEAN_STRONG_PTS
+            ]
+            rows.append(_raw_lean_row(key, name, cut_key, cut_label, sel))
+    return rows
+
+
+def raw_lean_test_status(rows):
+    """Plain-text state of the registered test (v3, all in-week leans, vs always-home)."""
+    r = next((x for x in rows if x["model_key"] == "v3" and x["cut"] == "all"), None)
+    if r is None or r["n"] < RAW_LEAN_TEST_MIN_GAMES:
+        n = 0 if r is None else r["n"]
+        return f"Registered test: v3 has {n}/{RAW_LEAN_TEST_MIN_GAMES} graded lean-games; not evaluated yet."
+    t = r["diff_t"]
+    passed = t is not None and t >= RAW_LEAN_TEST_T
+    t_str = f"{t:.2f}" if t is not None else "n/a"
+    return (f"Registered test: v3 vs always-home, n={r['n']}, t={t_str}: "
+            + ("PASS (earns an offseason re-fit; no in-season change)" if passed else "not passed"))
+
+
+RAW_LEAN_HEADER = (
+    "Model", "Cut", "Games", "Avg Lean CLV Fair Prob", "SE", "t", "Share +", "Avg Lean Pts",
+    "Always Home Avg", "Lean - Home", "Lean - Home SE", "Lean - Home t",
+    "Always Dog Games", "Always Dog Avg", "Line-only Fallbacks",
+)
+
+
+def _fmt_t(t):
+    return f"{t:+.2f}" if t is not None else "-"
+
+
+def raw_lean_table(rows):
+    out = [list(RAW_LEAN_HEADER)]
+    for r in rows:
+        out.append([
+            r["model"],
+            r["cut_label"],
+            r["n"],
+            f"{r['mean_pct']:+.2f}%",
+            f"{r['se_pct']:.2f}%",
+            _fmt_t(r["t"]),
+            f"{r['pos_pct']:.1f}%",
+            f"{r['mean_lean_pts']:+.2f}",
+            f"{r['home_mean_pct']:+.2f}%",
+            f"{r['diff_pct']:+.2f}%",
+            f"{r['diff_se_pct']:.2f}%",
+            _fmt_t(r["diff_t"]),
+            r["dog_n"],
+            f"{r['dog_mean_pct']:+.2f}%",
+            r["fallback"],
+        ])
+    return out
+
+
+def print_raw_lean_tables(raw_lean):
+    """raw_lean = {'in_week': rows, 'legacy': rows}."""
+    for regime, title in ((IN_WEEK, "RAW LEAN CLV (in-week)"), (LEGACY, "RAW LEAN CLV: LEGACY (does not count)")):
+        rows = raw_lean.get(regime)
+        if rows is None:
+            continue
+        print("\n" + title)
+        if regime == IN_WEEK:
+            print(raw_lean_test_status(rows))
+        for line in raw_lean_table(rows):
+            print(" | ".join(str(c) for c in line))
+
+
 def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
     """Builds a side-by-side comparison matrix for the active upcoming week across v1, v2, v3, v4."""
     all_weeks = []
@@ -1050,11 +1244,12 @@ def _sheet_summary_block(summary_rows, guard_metrics):
     return rows
 
 
-def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=None):
+def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=None, raw_lean=None):
     """Writes or overwrites the Model_Scorecard tab in Google Sheets.
 
     summary_rows/guard_metrics are the in-week block; legacy = (summary_rows, guard_metrics)
-    is written below it as a separate block excluded from promotion.
+    is written below it as a separate block excluded from promotion. raw_lean =
+    {'in_week': rows, 'legacy': rows} from evaluate_raw_leans goes last, below the slate.
     """
     now_utc_str = datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     now_et_str = datetime.now(pytz.timezone(LOCAL_TZ)).strftime("%Y-%m-%d %I:%M %p %Z")
@@ -1107,6 +1302,18 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=N
                 r.get("v4_pick", "-"),
                 r["consensus"],
             ])
+
+    # Section 4: Raw-lean CLV (R3; evaluation only, last so earlier sections keep their rows)
+    if raw_lean is not None:
+        rows.append([""])
+        rows.append([""])
+        rows.append(["RAW LEAN CLV (in-week; ticket = raw-lean side at the opening line and price; models are not pooled)"])
+        rows.extend(raw_lean_table(raw_lean.get(IN_WEEK, [])))
+        rows.append([raw_lean_test_status(raw_lean.get(IN_WEEK, []))])
+        if raw_lean.get(LEGACY) is not None:
+            rows.append([""])
+            rows.append(["RAW LEAN CLV: LEGACY (backfilled and pre-cutoff rows; does not count toward the test)"])
+            rows.extend(raw_lean_table(raw_lean[LEGACY]))
 
     max_retries = 5
     for attempt in range(1, max_retries + 1):
@@ -1243,12 +1450,17 @@ def main():
     # 4. Build Active Slate Comparison
     slate_df = build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=v4_df)
 
+    # 4b. Raw-lean CLV (R3), in-week and legacy kept apart
+    shadow_dfs = {"v2": v2_df, "v3": v3_df, "v4": v4_df}
+    raw_lean = {r: evaluate_raw_leans(master_df, shadow_dfs, regime=r) for r in REGIMES}
+
     # 5. Output to Console, GitHub Actions, and Google Sheets
     print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=legacy)
+    print_raw_lean_tables(raw_lean)
     publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=legacy)
 
     if has_creds and not args.test:
-        write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=legacy)
+        write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=legacy, raw_lean=raw_lean)
 
     print("Multi-Model comparison complete.")
 

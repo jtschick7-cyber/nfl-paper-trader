@@ -2,11 +2,12 @@
 
 ## Current state
 
-- **Branch:** `claude/r2-scorecard-hygiene` (PR open). R1 merged as PR #14.
-- **Last task:** R2, scorecard hygiene (2026-11-14).
-- **Next task:** **R3, raw-lean tracking.** Spec: `notes/implementation-plan/R3-raw-lean-tracking.md`. Owner question for R3 is in the plan README table.
+- **Branch:** `claude/r3-raw-lean-tracking` (PR open). R1 merged as PR #14, R2 as PR #15.
+- **Last task:** R3, raw-lean tracking (2026-11-14).
+- **Next task:** **R4, production backtest.** Spec: `notes/implementation-plan/R4-production-backtest.md`.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
-- **After R2 merges and the next scorecard refresh:** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
+- **After the next scorecard refresh (R2 merged):** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
+- **After R3 merges:** run the "Backfill raw leans" workflow as a dry run, review it (expect V2 57, V3 27 with 19 at ≥ 1.5 pts and 93 pre-fix skipped, V4 42 with 2 blank sides, plus any rows logged since 11-13), then once with `apply`. After the next Tuesday run: new shadow rows end with `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side`, and `Model_Scorecard` ends with the raw-lean section.
 
 ## Task queue
 
@@ -14,11 +15,22 @@
 |---|---|---|
 | R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR #14), live check pending |
 | R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR), live check pending |
-| R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | not started |
+| R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR), backfill and live check pending |
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | not started (independent of R1–R3) |
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | not started (needs R4, R2) |
 
 ## Log
+
+### 2026-11-14: R3 raw-lean tracking
+
+- Owner accepted the pre-registered test as written; it is in the README under the promotion rule.
+- `src/raw_lean.py`: `raw_lean_cells` (4 decimals), `lean_side`, `unblend_margin`. v2/v3/v4 loggers append `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side` after R2's columns, taken before the blend.
+- `src/backfill_raw_leans.py` + manual `backfill_raw_leans.yml` (sheet-writer, dry run by default): fills blanks only; β by `artifact_id`, else by sigma; pre-fix v3 skipped; v4 side blank under 0.01 deviation.
+- Dump dry run: V3 27 leans, 19 at ≥ 1.5, 15/27 differ from `v3_best_side` (all match the review). V4 42 rows, 2 blank sides, 23/40 differ (review: 24/42, counting the two ambiguous rows).
+- `compare_models.evaluate_raw_leans`: first row per game, lean side at the opening line and price, `clv_fair_probability` with line-only fallback counted; all and ≥ 1.5 cuts; always-home (paired diff SE/t) and always-underdog on the same games; in-week and legacy blocks; status line for the registered test. Section goes last on `Model_Scorecard`.
+- Spec deviation: v3 unblend precision is 0.5e-4/β ≈ 1.4e-3, not 1e-3; the test asserts that bound.
+- Two R2 tests updated for the three new trailing columns (positions, not assertions, changed).
+- `pytest tests/`: 172 passed (33 new).
 
 ### 2026-11-14: R2 scorecard hygiene
 

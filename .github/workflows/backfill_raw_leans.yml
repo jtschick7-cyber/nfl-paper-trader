@@ -1,0 +1,47 @@
+name: Backfill raw leans (one-off)
+
+# R3: fill raw_mu_home_margin, raw_lean_pts, raw_lean_side on existing V2/V3/V4 shadow
+# rows where blank. Dry-run unless "apply" is ticked. Review the dry-run log first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write to the Sheet (unticked = dry run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sheet-writer
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      SEASON: "2026"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Backfill raw leans
+        run: python -m src.backfill_raw_leans ${{ inputs.apply && '--apply' || '' }}

@@ -295,3 +295,139 @@ def test_weekly_clv_uses_price_aware_number_when_prices_exist():
     m = cm.compute_metrics([priced], "test")
     assert m["weekly_clv_prob_pct"][12] == pytest.approx(priced["clv_fair_prob"] * 100.0, abs=0.01)
     assert m["clv_positive_weeks"] == 0
+
+
+# --- R3: raw-lean CLV -------------------------------------------------------
+
+def _lean_row(gid, side, home_line="-3", ts=IN_WEEK_TS, pts=None, **kw):
+    row = {
+        "game_id": gid, "week": 12, "logged_at_utc": ts, "home_line": home_line,
+        "home_odds": "-110", "away_odds": "-110", "raw_lean_side": side,
+        "raw_lean_pts": pts if pts is not None else ("2.0" if side == "HOME" else "-2.0" if side == "AWAY" else "0"),
+        "v3_best_side": "HOME", "v3_best_line": home_line, "v3_decision": "PASS",
+    }
+    row.update(kw)
+    return row
+
+
+def _close(gid, close, regime="in_week", home_odds=-110, away_odds=-110):
+    return {"game_id": gid, "decision_regime": regime, "closing_line": close,
+            "closing_odds": home_odds, "closing_away_odds": away_odds}
+
+
+def _fair(side, home_line, close):
+    line = home_line if side == "HOME" else -home_line
+    return cm.clv_fair_probability(side, line, -110, -110, close, -110, -110) * 100.0
+
+
+def _lean_block(rows, model="v3", cut="all"):
+    return next(r for r in rows if r["model_key"] == model and r["cut"] == cut)
+
+
+def test_raw_lean_grading_uses_raw_lean_side_not_best_side():
+    master = pd.DataFrame([_close("G1", -2.0)])
+    v3 = pd.DataFrame([_lean_row("G1", "AWAY")])  # v3_best_side is HOME
+    r = _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))
+    assert r["n"] == 1
+    assert r["mean_pct"] == pytest.approx(_fair("AWAY", -3.0, -2.0), abs=1e-6)
+    assert r["mean_pct"] > 0
+
+
+def test_raw_lean_baselines_use_the_same_games():
+    master = pd.DataFrame([_close("G1", -2.0), _close("G2", -5.0), _close("G3", None)])
+    v3 = pd.DataFrame([
+        _lean_row("G1", "AWAY"),
+        _lean_row("G2", ""),        # zero lean: no ticket, so not in the baselines either
+        _lean_row("G3", "HOME"),    # no close
+    ])
+    r = _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))
+    assert r["n"] == 1
+    assert r["home_mean_pct"] == pytest.approx(_fair("HOME", -3.0, -2.0), abs=1e-6)
+    assert r["diff_pct"] == pytest.approx(r["mean_pct"] - r["home_mean_pct"], abs=1e-6)
+
+
+def test_raw_lean_paired_difference_se_and_t():
+    master = pd.DataFrame([_close("G1", -2.0), _close("G2", -4.5), _close("G3", -3.5)])
+    v3 = pd.DataFrame([_lean_row("G1", "AWAY"), _lean_row("G2", "HOME"), _lean_row("G3", "AWAY")])
+    r = _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))
+    diffs = [
+        _fair("AWAY", -3.0, -2.0) - _fair("HOME", -3.0, -2.0),
+        0.0,
+        _fair("AWAY", -3.0, -3.5) - _fair("HOME", -3.0, -3.5),
+    ]
+    mean = sum(diffs) / 3
+    se = (sum((d - mean) ** 2 for d in diffs) / 2) ** 0.5 / 3 ** 0.5
+    assert r["n"] == 3
+    assert r["diff_pct"] == pytest.approx(mean, abs=1e-6)
+    assert r["diff_se_pct"] == pytest.approx(se, abs=1e-6)
+    assert r["diff_t"] == pytest.approx(mean / se, abs=1e-6)
+    assert r["pos_pct"] == pytest.approx(100.0 * sum(1 for g in ["G1", "G2", "G3"]
+                                                    if {"G1": _fair("AWAY", -3.0, -2.0), "G2": _fair("HOME", -3.0, -4.5), "G3": _fair("AWAY", -3.0, -3.5)}[g] > 0) / 3)
+
+
+def test_raw_lean_always_underdog_skips_pickem():
+    master = pd.DataFrame([_close("G1", -2.0), _close("G2", 1.0)])
+    v3 = pd.DataFrame([_lean_row("G1", "HOME"), _lean_row("G2", "HOME", home_line="0")])
+    r = _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))
+    assert r["n"] == 2 and r["dog_n"] == 1
+    assert r["dog_mean_pct"] == pytest.approx(_fair("AWAY", -3.0, -2.0), abs=1e-6)
+
+
+def test_raw_lean_strong_cut_and_first_row_per_game():
+    master = pd.DataFrame([_close("G1", -2.0), _close("G2", -2.0)])
+    v3 = pd.DataFrame([
+        _lean_row("G1", "AWAY", pts="-1.4"),
+        _lean_row("G1", "HOME", pts="3.0"),  # later re-evaluation: ignored
+        _lean_row("G2", "AWAY", pts="-1.5"),
+    ])
+    rows = cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week")
+    assert _lean_block(rows)["n"] == 2
+    strong = _lean_block(rows, cut="strong")
+    assert strong["n"] == 1 and strong["mean_lean_pts"] == pytest.approx(-1.5)
+
+
+def test_raw_lean_legacy_rows_stay_out_of_primary_block():
+    master = pd.DataFrame([_close("G1", -2.0), _close("G2", -2.0, regime="")])
+    v3 = pd.DataFrame([
+        _lean_row("G1", "AWAY", ts=LEGACY_TS),  # logged before the cutoff
+        _lean_row("G2", "AWAY"),                 # game not decided in-week
+    ])
+    assert _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))["n"] == 0
+    assert _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="legacy"))["n"] == 2
+
+
+def test_raw_lean_falls_back_to_line_only_clv_and_counts_it():
+    master = pd.DataFrame([{"game_id": "G1", "decision_regime": "in_week", "closing_line": -2.0}])
+    v3 = pd.DataFrame([_lean_row("G1", "AWAY")])
+    r = _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))
+    assert r["n"] == 1 and r["fallback"] == 1
+    assert r["mean_pct"] == pytest.approx(cm.clv_win_probability(3.0, 2.0) * 100.0, abs=1e-6)
+
+
+def test_raw_lean_rows_without_lean_columns_are_ignored():
+    master = pd.DataFrame([_close("G1", -2.0)])
+    v3 = pd.DataFrame([{"game_id": "G1", "logged_at_utc": IN_WEEK_TS, "home_line": "-3"}])
+    assert _lean_block(cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"))["n"] == 0
+
+
+def test_sheet_has_raw_lean_section_with_legacy_block(monkeypatch):
+    ws = _FakeWorksheet()
+    monkeypatch.setattr(cm, "get_or_create_worksheet", lambda _name: ws)
+    master = pd.DataFrame([_close("G1", -2.0)])
+    v3 = pd.DataFrame([_lean_row("G1", "AWAY")])
+    raw = {
+        "in_week": cm.evaluate_raw_leans(master, {"v3": v3}, regime="in_week"),
+        "legacy": cm.evaluate_raw_leans(master, {"v3": v3}, regime="legacy"),
+    }
+    summary = [cm.compute_metrics([], "Model v1 (Master_Bets Baseline)")]
+    guard = cm.compute_metrics([], "Guard Suppressed Danger Bets", "Hypothetical Placed")
+    cm.write_google_sheet_scorecard(summary, guard, pd.DataFrame(), raw_lean=raw)
+    firsts = [row[0] if row else "" for row in ws.values]
+    main_idx = next(i for i, v in enumerate(firsts) if str(v).startswith("RAW LEAN CLV"))
+    legacy_idx = next(i for i, v in enumerate(firsts) if str(v).startswith("RAW LEAN CLV: LEGACY"))
+    assert main_idx < legacy_idx
+    assert ws.values[main_idx + 1] == list(cm.RAW_LEAN_HEADER)
+    v3_all = next(row for row in ws.values[main_idx + 2:legacy_idx] if row[0] == "Model v3 raw lean" and row[1] == "All leans")
+    assert v3_all[2] == 1
+    assert all(len(row) == len(cm.RAW_LEAN_HEADER) for row in ws.values[main_idx + 1:legacy_idx] if row and str(row[0]).startswith("Model"))
+    assert any(str(row[0]).startswith("Registered test: v3 has 1/100") for row in ws.values if row)

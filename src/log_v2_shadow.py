@@ -25,6 +25,7 @@ from src.model_v2_core import (
 )
 from src.odds_utils import get_cached_live_home_spread
 from src.artifacts import artifact_id as build_artifact_id
+from src.raw_lean import raw_lean_cells
 from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.v2_sheet_utils import get_or_create_worksheet
 
@@ -76,6 +77,10 @@ HEADERS = [
     # Appended in R2; never reorder.
     "artifact_id",
     "decision_regime",
+    # R3: pre-blend margin and the lean derived from it (appended; never reorder)
+    "raw_mu_home_margin",
+    "raw_lean_pts",
+    "raw_lean_side",
 ]
 
 DECISION_REGIME = "in_week"
@@ -323,6 +328,7 @@ def main():
         X = np.array([[feats[c] for c in feature_columns]], dtype=float)
 
         mu = float(ridge.predict(scaler.transform(X))[0])
+        raw_lean = raw_lean_cells(mu, home_line)  # v2 has no blend: raw = mu
 
         # Discrete key-number aware win probability (weights spikes at 3, 7, 6, 10)
         spread_res = calculate_spread_probabilities(mu, sigma, home_line)
@@ -443,6 +449,7 @@ def main():
                 clean("; ".join(notes)),
                 clean(artifact_id),
                 clean(DECISION_REGIME),
+                *raw_lean,
             ]
         )
 
