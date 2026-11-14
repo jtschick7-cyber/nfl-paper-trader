@@ -28,14 +28,20 @@ try:
 except ImportError:
     nfl = None
 
-from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, SEASON
-from src.key_numbers import calculate_spread_probabilities
+from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, MIN_EDGE_THRESHOLD, SEASON
+from src.key_numbers import calculate_spread_probabilities, market_implied_mean
+from src.odds_utils import american_to_implied_prob, remove_vig
 from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.v2_sheet_utils import get_or_create_worksheet
 
 SCORECARD_TAB = "Model_Scorecard"
 # Margin sigma used to value line movement in CLV (market close as the mean margin)
 CLV_SIGMA = 13.1
+# Shadow rows logged before this are legacy (R2): excluded from any promotion sample.
+SHADOW_LEGACY_CUTOFF_UTC = "2026-11-03T00:00:00Z"
+IN_WEEK = "in_week"
+LEGACY = "legacy"
+REGIMES = (IN_WEEK, LEGACY)
 
 
 def safe_float(value, default=None):
@@ -111,13 +117,114 @@ def clv_win_probability(pick_line, closing_pick_line, sigma=CLV_SIGMA):
     Win probability gained (or lost) from line movement, in probability points.
     Treats the closing line as the market's margin and compares the key-number-aware
     no-push cover probability at the line taken vs at the closing line, so a move off
-    3 or 7 counts for more than a move between dead numbers. Price changes are ignored
-    (closing price for the pick side is not stored).
+    3 or 7 counts for more than a move between dead numbers. Price changes are ignored;
+    clv_fair_probability is the price-aware version.
     """
     close_mu = -float(closing_pick_line)
     p_taken = calculate_spread_probabilities(close_mu, sigma, float(pick_line))["cond_home_win"]
     p_close = calculate_spread_probabilities(close_mu, sigma, float(closing_pick_line))["cond_home_win"]
     return float(p_taken - p_close)
+
+
+def _devig_home(home_odds, away_odds):
+    """De-vigged home probability from a two-way price pair, or None if either is missing."""
+    h, a = safe_float(home_odds), safe_float(away_odds)
+    if h is None or a is None or h == 0 or a == 0:
+        return None
+    return remove_vig(american_to_implied_prob(h), american_to_implied_prob(a))[0]
+
+
+def clv_fair_probability(pick_side, pick_line, open_home_odds, open_away_odds,
+                         close_home_line, close_home_odds, close_away_odds,
+                         total_line=None, sigma=CLV_SIGMA):
+    """
+    Price-aware CLV: fair probability of the ticket at the close minus its fair
+    probability when taken, in probability points.
+
+    The closing home line and its de-vigged price fix the market's mean margin m*;
+    the ticket (pick side at pick_line) is then valued at m*. Returns None when a
+    price or the closing line is missing, so callers fall back to clv_win_probability.
+    """
+    side = str(pick_side).strip().upper()
+    q_open_home = _devig_home(open_home_odds, open_away_odds)
+    q_close_home = _devig_home(close_home_odds, close_away_odds)
+    close_line = safe_float(close_home_line)
+    line = safe_float(pick_line)
+    if q_open_home is None or q_close_home is None or close_line is None or line is None or side not in {"HOME", "AWAY"}:
+        return None
+    total = safe_float(total_line)
+    mean = market_implied_mean(close_line, q_close_home, sigma, total)
+    if side == "HOME":
+        q_open = q_open_home
+        p_ticket = calculate_spread_probabilities(mean, sigma, line, total)["cond_home_win"]
+    else:
+        q_open = 1.0 - q_open_home
+        p_ticket = calculate_spread_probabilities(mean, sigma, -line, total)["cond_away_win"]
+    return float(p_ticket - q_open)
+
+
+def parse_logged_at(value):
+    """UTC timestamp from either logged_at_utc format (ISO in V2/V3, '... UTC' in V4), else None."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return None
+    if s.upper().endswith(" UTC"):
+        s = s[:-4].strip() + "+00:00"
+    ts = pd.to_datetime(s, utc=True, errors="coerce")
+    return None if pd.isna(ts) else ts
+
+
+_LEGACY_CUTOFF = parse_logged_at(SHADOW_LEGACY_CUTOFF_UTC)
+
+
+def master_regime_map(master_df):
+    """{game_id: Master_Bets.decision_regime} (blank when unset)."""
+    out = {}
+    if master_df is None or master_df.empty or "game_id" not in master_df.columns:
+        return out
+    for _, row in master_df.iterrows():
+        gid = str(row.get("game_id", "")).strip()
+        if gid:
+            val = row.get("decision_regime", "")
+            out[gid] = "" if val is None or (isinstance(val, float) and math.isnan(val)) else str(val).strip()
+    return out
+
+
+def v1_row_regime(row):
+    """A v1 bet is in_week only if Master_Bets says so; blank and lookahead are legacy."""
+    val = row.get("decision_regime", "")
+    val = "" if val is None or (isinstance(val, float) and math.isnan(val)) else str(val).strip()
+    return IN_WEEK if val == IN_WEEK else LEGACY
+
+
+def shadow_row_regime(row, master_regimes):
+    """
+    in_week only when the row was logged at/after SHADOW_LEGACY_CUTOFF_UTC and its game was
+    decided in-week on Master_Bets. A missing timestamp or Master_Bets row counts as legacy.
+    """
+    ts = parse_logged_at(row.get("logged_at_utc"))
+    if ts is None or ts < _LEGACY_CUTOFF:
+        return LEGACY
+    gid = str(row.get("game_id", "")).strip()
+    return IN_WEEK if master_regimes.get(gid) == IN_WEEK else LEGACY
+
+
+def filter_regime(df, regime, master_regimes, kind="shadow"):
+    """Rows of df in `regime`; kind='v1' uses the row's own decision_regime."""
+    if df is None or df.empty or regime is None:
+        return df
+    if kind == "v1":
+        mask = df.apply(lambda r: v1_row_regime(r) == regime, axis=1)
+    else:
+        mask = df.apply(lambda r: shadow_row_regime(r, master_regimes) == regime, axis=1)
+    return df[mask.astype(bool)] if len(mask) else df
+
+
+def guard_counts(decision, edge):
+    """A SUPPRESS_DANGER row is a suppressed bet only if it cleared the edge threshold."""
+    return decision == "SUPPRESS_DANGER" and edge is not None and edge >= MIN_EDGE_THRESHOLD
 
 
 def closing_reference_line(row):
@@ -145,8 +252,16 @@ def weekly_clv_prob(clv_evaluated):
     return {w: sum(p) / len(p) * 100.0 for w, p in sorted(by_week.items())}
 
 
-def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None, week=None):
-    """Grades a single spread bet and calculates realized CLV."""
+def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None, game_id=None, stake_units=None, week=None,
+                     open_home_odds=None, open_away_odds=None, close_single_line=None,
+                     close_home_odds=None, close_away_odds=None, total_line=None):
+    """
+    Grades a single spread bet and calculates realized CLV.
+
+    closing_line (consensus when captured) drives the line-only numbers. The price-aware
+    clv_fair_prob uses the single-book close (close_single_line with its prices), since the
+    consensus line has no price; it falls back to clv_prob when a price is missing.
+    """
     side = str(side).strip().upper()
     line = float(line)
     odds = float(odds) if odds is not None else -110.0
@@ -187,6 +302,14 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         clv_result = "BEAT" if clv_pts > 1e-9 else ("LOSE" if clv_pts < -1e-9 else "TIE")
         clv_prob = clv_win_probability(line, float(closing_pick_line))
 
+    clv_fair = clv_fair_probability(
+        side, line, open_home_odds, open_away_odds,
+        close_single_line, close_home_odds, close_away_odds, total_line=total_line,
+    )
+    clv_fair_priced = clv_fair is not None
+    if clv_fair is None:
+        clv_fair = clv_prob
+
     return {
         "game_id": game_id,
         "week": week,
@@ -198,6 +321,8 @@ def grade_single_bet(side, line, odds, home_score, away_score, closing_line=None
         "clv_beat": clv_beat,
         "clv_result": clv_result,
         "clv_prob": clv_prob,
+        "clv_fair_prob": clv_fair,
+        "clv_fair_priced": clv_fair_priced,
         "margin": margin,
         "cover": cover,
     }
@@ -219,8 +344,12 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
             "kelly_roi_pct": 0.0,
             "clv_beat_pct": 0.0,
             "clv_tie_pct": 0.0,
+            "clv_lose_pct": 0.0,
             "avg_clv": 0.0,
             "avg_clv_prob_pct": 0.0,
+            "avg_clv_fair_prob_pct": 0.0,
+            "clv_fair_se_pct": 0.0,
+            "clv_fair_priced": 0,
             "weekly_clv_prob_pct": {},
             "clv_weeks": 0,
             "clv_positive_weeks": 0,
@@ -241,15 +370,23 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
     total_k_staked = sum(b.get("kelly_stake", FLAT_BET_SIZE) for b in graded_bets)
     kelly_roi_pct = round(kelly_units / total_k_staked * 100.0, 2) if total_k_staked > 0 else 0.0
 
-    # CLV beat % is over bets where the line moved (beats vs loses); ties are reported separately
+    # Beat, tie and lose are shares of all bets with a recorded close (they sum to 100)
     clv_evaluated = [b for b in graded_bets if b["clv_points"] is not None]
+    fair = [b["clv_fair_prob"] for b in graded_bets if b.get("clv_fair_prob") is not None]
+    clv_fair_priced = sum(1 for b in graded_bets if b.get("clv_fair_priced"))
+    avg_clv_fair_prob_pct = (sum(fair) / len(fair) * 100.0) if fair else 0.0
+    if len(fair) > 1:
+        mean_f = sum(fair) / len(fair)
+        sd = math.sqrt(sum((f - mean_f) ** 2 for f in fair) / (len(fair) - 1))
+        clv_fair_se_pct = sd / math.sqrt(len(fair)) * 100.0
+    else:
+        clv_fair_se_pct = 0.0
     if clv_evaluated:
-        clv_beats = sum(1 for b in clv_evaluated if b.get("clv_result") == "BEAT")
-        clv_loses = sum(1 for b in clv_evaluated if b.get("clv_result") == "LOSE")
-        moved = clv_beats + clv_loses
-        clv_beat_pct = (clv_beats / moved * 100.0) if moved > 0 else 0.0
-        clv_tie_pct = (len(clv_evaluated) - moved) / len(clv_evaluated) * 100.0
-        avg_clv = sum(b["clv_points"] for b in clv_evaluated) / len(clv_evaluated)
+        n_close = len(clv_evaluated)
+        clv_beat_pct = sum(1 for b in clv_evaluated if b.get("clv_result") == "BEAT") / n_close * 100.0
+        clv_lose_pct = sum(1 for b in clv_evaluated if b.get("clv_result") == "LOSE") / n_close * 100.0
+        clv_tie_pct = sum(1 for b in clv_evaluated if b.get("clv_result") == "TIE") / n_close * 100.0
+        avg_clv = sum(b["clv_points"] for b in clv_evaluated) / n_close
         probs = [b["clv_prob"] for b in clv_evaluated if b.get("clv_prob") is not None]
         avg_clv_prob_pct = (sum(probs) / len(probs) * 100.0) if probs else 0.0
         weekly = weekly_clv_prob(clv_evaluated)
@@ -257,6 +394,7 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         weekly = {}
         clv_beat_pct = 0.0
         clv_tie_pct = 0.0
+        clv_lose_pct = 0.0
         avg_clv = 0.0
         avg_clv_prob_pct = 0.0
 
@@ -272,8 +410,13 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "kelly_roi_pct": kelly_roi_pct,
         "clv_beat_pct": round(clv_beat_pct, 1),
         "clv_tie_pct": round(clv_tie_pct, 1),
+        "clv_lose_pct": round(clv_lose_pct, 1),
         "avg_clv": round(avg_clv, 2),
         "avg_clv_prob_pct": round(avg_clv_prob_pct, 2),
+        # Promotion rule conditions 2 and 4 (price-aware; line-only where no closing price)
+        "avg_clv_fair_prob_pct": round(avg_clv_fair_prob_pct, 2),
+        "clv_fair_se_pct": round(clv_fair_se_pct, 2),
+        "clv_fair_priced": clv_fair_priced,
         # Promotion rule condition 3: share of weeks with a positive Avg CLV Win Prob
         "weekly_clv_prob_pct": {w: round(v, 2) for w, v in weekly.items()},
         "clv_weeks": len(weekly),
@@ -326,28 +469,57 @@ def v3_kelly_stake_map(v3_df, max_slate_exposure=10.0):
     return stakes
 
 
-def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
+def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None):
     """Extracts, grades, and aggregates performance across all models (v1, v2, v3, v4).
 
     Shadow tabs are graded on each game's FIRST logged evaluation (the Tuesday decision,
     matching v1). Keeping later re-evaluations let line moves toward the model turn picks
     into PASS and drop them, biasing CLV and making the head-to-head unequal.
+
+    regime ('in_week' or 'legacy') keeps only rows of that regime before picking each
+    game's first row, so a legacy row never shadows an in-week one. None grades everything.
     """
+    if master_df is None:
+        master_df = pd.DataFrame()
+    if v2_df is None:
+        v2_df = pd.DataFrame()
+    if v3_df is None:
+        v3_df = pd.DataFrame()
+    full_master_df = master_df
+    show_v4 = v4_df is not None and not v4_df.empty
+    if regime is not None:
+        regimes = master_regime_map(master_df)
+        v2_df = filter_regime(v2_df, regime, regimes)
+        v3_df = filter_regime(v3_df, regime, regimes)
+        v4_df = filter_regime(v4_df, regime, regimes)
+        master_df = filter_regime(master_df, regime, regimes, kind="v1")
     if v2_df is not None and not v2_df.empty and "game_id" in v2_df.columns:
         v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="first")
     v3_df = first_priced_decision(v3_df, "v3_best_line")
     v4_df = first_priced_decision(v4_df, "v4_best_line")
 
+    # Closes come from every Master_Bets row: a shadow bet's game may be legacy for v1
     closing_map = {}
     master_by_gid = {}
-    if not master_df.empty:
-        for _, row in master_df.iterrows():
+    if not full_master_df.empty:
+        for _, row in full_master_df.iterrows():
             gid = str(row.get("game_id", "")).strip()
             if gid:
                 master_by_gid[gid] = row
                 c_line = closing_reference_line(row)
                 if c_line is not None:
                     closing_map[gid] = c_line
+
+    def close_prices(gid):
+        m = master_by_gid.get(gid)
+        if m is None:
+            return {}
+        return {
+            "close_single_line": safe_float(m.get("closing_line")),
+            "close_home_odds": safe_float(m.get("closing_odds")),
+            "close_away_odds": safe_float(m.get("closing_away_odds")),
+            "total_line": safe_float(m.get("total_line")),
+        }
 
     # 1. Evaluate v1 (Master_Bets)
     v1_bets = []
@@ -375,6 +547,9 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     closing_line=closing_map.get(gid),
                     game_id=gid,
                     week=bet_week(row, gid),
+                    open_home_odds=safe_float(row.get("opening_odds")),
+                    open_away_odds=safe_float(row.get("opening_away_odds")),
+                    **close_prices(gid),
                 )
                 v1_bets.append(g)
 
@@ -404,6 +579,9 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     closing_line=closing_map.get(gid),
                     game_id=gid,
                     week=bet_week(row, gid),
+                    open_home_odds=safe_float(row.get("home_odds")),
+                    open_away_odds=safe_float(row.get("away_odds")),
+                    **close_prices(gid),
                 )
                 v2_bets.append(g)
 
@@ -437,13 +615,16 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     game_id=gid,
                     week=bet_week(row, gid),
                     stake_units=v3_stakes.get(gid),
+                    open_home_odds=safe_float(row.get("home_odds")),
+                    open_away_odds=safe_float(row.get("away_odds")),
+                    **close_prices(gid),
                 )
 
                 if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
                     v3_bets.append(g)
                     if dec == "HIGH_CONVICTION" or edge >= 0.035:
                         v3_high_bets.append(g)
-                elif dec == "SUPPRESS_DANGER":
+                elif guard_counts(dec, edge):
                     suppressed_bets.append(g)
 
     # 4. Evaluate v4 (V4_Shadow)
@@ -473,13 +654,16 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
                     game_id=gid,
                     week=bet_week(row, gid),
                     stake_units=safe_float(row.get("v4_stake_units")),
+                    open_home_odds=safe_float(row.get("home_odds")),
+                    open_away_odds=safe_float(row.get("away_odds")),
+                    **close_prices(gid),
                 )
 
                 if dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
                     v4_bets.append(g)
                     if dec == "HIGH_CONVICTION" or edge >= 0.035:
                         v4_high_bets.append(g)
-                elif dec == "SUPPRESS_DANGER" and gid not in [b.get("game_id") for b in suppressed_bets]:
+                elif guard_counts(dec, edge) and gid not in [b.get("game_id") for b in suppressed_bets]:
                     suppressed_bets.append(g)
 
     summary_rows = [
@@ -489,7 +673,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
         compute_metrics(v3_high_bets, "Model v3 High-Conviction (>=3.5%)", "High-Conviction"),
     ]
 
-    if v4_df is not None and not v4_df.empty:
+    if show_v4:
         summary_rows.append(compute_metrics(v4_bets, "Model v4 (EPA+QB+Luck+Totals)", "All Picks"))
         summary_rows.append(compute_metrics(v4_high_bets, "Model v4 High-Conviction (>=3.5%)", "High-Conviction"))
 
@@ -507,6 +691,14 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None):
     }
 
     return summary_rows, guard_metrics, counts_dict
+
+
+def evaluate_regimes(master_df, v2_df, v3_df, scores, v4_df=None):
+    """{'in_week': (summary, guard, counts), 'legacy': (...)}; only in_week feeds promotion."""
+    return {
+        r: evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=v4_df, regime=r)
+        for r in REGIMES
+    }
 
 
 def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
@@ -694,23 +886,21 @@ def weekly_clv_table(summary_rows):
     return header, rows
 
 
-def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
-    """Renders a clean CLI dashboard."""
-    print("\n" + "=" * 94)
-    print("        NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3 vs v4)       ")
-    print("=" * 94)
-
-    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8} | {'CLV Tie':<7} | {'Kelly U':<8} | {'Kelly ROI':<9}")
-    print("-" * 136)
+def _print_summary_table(summary_rows, guard_metrics):
+    print(f"{'Model / Architecture':<35} | {'Bets':<5} | {'Record':<14} | {'Win %':<6} | {'Units':<8} | {'ROI %':<7} | {'CLV Beat':<8} | {'CLV Tie':<7} | {'CLV Lose':<8} | {'Fair CLV':<8} | {'Kelly U':<8} | {'Kelly ROI':<9}")
+    print("-" * 160)
 
     for row in summary_rows:
-        u_str = f"{row['units']:+.2f}u" if row['bets'] > 0 else "0.00u"
-        roi_str = f"{row['roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
-        clv_str = f"{row['clv_beat_pct']:.1f}%" if row['bets'] > 0 else "0.0%"
-        tie_str = f"{row.get('clv_tie_pct', 0.0):.1f}%" if row['bets'] > 0 else "0.0%"
-        k_u_str = f"{row['kelly_units']:+.2f}u" if row['bets'] > 0 else "0.00u"
-        k_roi_str = f"{row['kelly_roi_pct']:+.1f}%" if row['bets'] > 0 else "0.0%"
-        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8} | {tie_str:>7} | {k_u_str:>8} | {k_roi_str:>9}")
+        has = row['bets'] > 0
+        u_str = f"{row['units']:+.2f}u" if has else "0.00u"
+        roi_str = f"{row['roi_pct']:+.1f}%" if has else "0.0%"
+        clv_str = f"{row['clv_beat_pct']:.1f}%" if has else "0.0%"
+        tie_str = f"{row.get('clv_tie_pct', 0.0):.1f}%" if has else "0.0%"
+        lose_str = f"{row.get('clv_lose_pct', 0.0):.1f}%" if has else "0.0%"
+        fair_str = f"{row.get('avg_clv_fair_prob_pct', 0.0):+.2f}%" if has else "0.00%"
+        k_u_str = f"{row['kelly_units']:+.2f}u" if has else "0.00u"
+        k_roi_str = f"{row['kelly_roi_pct']:+.1f}%" if has else "0.0%"
+        print(f"{row['model']:<35} | {row['bets']:<5} | {row['record']:<14} | {row['win_pct']:>5.1f}% | {u_str:>8} | {roi_str:>7} | {clv_str:>8} | {tie_str:>7} | {lose_str:>8} | {fair_str:>8} | {k_u_str:>8} | {k_roi_str:>9}")
 
     print("-" * 94)
     g_bets = guard_metrics['bets']
@@ -721,7 +911,21 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
         print(f"{'Guard Suppressed Bets (Saved)':<35} | {g_bets:<5} | {guard_metrics['record']:<14} | Would Have PnL: {g_units} (Estimated Saved: {saved_str})")
     else:
         print(f"{'Guard Suppressed Bets (Saved)':<35} | 0     | 0W - 0L - 0P   | No completed games with suppressed danger yet.")
+
+
+def print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=None):
+    """Renders a clean CLI dashboard. legacy = (summary_rows, guard_metrics) for pre-R1 rows."""
+    print("\n" + "=" * 94)
+    print("        NFL MULTI-MODEL COMPARISON SCORECARD (v1 vs v2 vs v3 vs v4)       ")
     print("=" * 94)
+    print("IN-WEEK DECISIONS (promotion sample)")
+    _print_summary_table(summary_rows, guard_metrics)
+    print("=" * 94)
+    if legacy is not None:
+        print("\nLEGACY (excluded from promotion): look-ahead v1 picks and shadow rows logged before "
+              + SHADOW_LEGACY_CUTOFF_UTC)
+        _print_summary_table(*legacy)
+        print("=" * 94)
 
     w_header, w_rows = weekly_clv_table(summary_rows)
     print("\nWEEKLY AVG CLV WIN PROB (promotion rule: positive in >= 60% of weeks bet)")
@@ -745,7 +949,7 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df):
         print("=" * 115 + "\n")
 
 
-def publish_github_summary(summary_rows, guard_metrics, slate_df):
+def publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=None):
     """Appends Markdown dashboard to GitHub Actions Step Summary if running in CI."""
     summary_path = os.getenv("GITHUB_STEP_SUMMARY")
     if not summary_path:
@@ -755,18 +959,25 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
     md_lines.append("## 🏈 NFL Multi-Model Performance Scorecard\n")
     md_lines.append(f"*Last updated: {datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*\n")
 
-    md_lines.append("| Model / Architecture | Bets | Record | Win % | Units PnL | ROI % | CLV Beat % | Kelly Units | Kelly ROI % |")
-    md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+    def md_table(rows_in, guard):
+        md_lines.append("| Model / Architecture | Bets | Record | Win % | Units PnL | ROI % | CLV Beat / Tie / Lose % | Avg CLV Fair Prob | Kelly Units | Kelly ROI % |")
+        md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        for r in rows_in:
+            u_str = f"**{r['units']:+.2f}u**" if r['bets'] > 0 else "0.00u"
+            roi_str = f"**{r['roi_pct']:+.1f}%**" if r['bets'] > 0 else "0.0%"
+            btl = f"{r['clv_beat_pct']:.0f} / {r.get('clv_tie_pct', 0.0):.0f} / {r.get('clv_lose_pct', 0.0):.0f}"
+            fair = f"{r.get('avg_clv_fair_prob_pct', 0.0):+.2f}% ± {r.get('clv_fair_se_pct', 0.0):.2f}"
+            md_lines.append(f"| {r['model']} | {r['bets']} | {r['record']} | {r['win_pct']:.1f}% | {u_str} | {roi_str} | {btl} | {fair} | {r['kelly_units']:+.2f}u | {r['kelly_roi_pct']:+.1f}% |")
+        if guard['bets'] > 0:
+            saved = -guard['units']
+            saved_str = f"+{saved:.2f}u" if saved > 0 else "0.00u"
+            md_lines.append(f"| 🛡️ *Injury/RLM Suppressed (Saved)* | {guard['bets']} | {guard['record']} | - | Would PnL: {guard['units']:+.2f}u | Saved: **{saved_str}** | - | - | - | - |")
 
-    for r in summary_rows:
-        u_str = f"**{r['units']:+.2f}u**" if r['bets'] > 0 else "0.00u"
-        roi_str = f"**{r['roi_pct']:+.1f}%**" if r['bets'] > 0 else "0.0%"
-        md_lines.append(f"| {r['model']} | {r['bets']} | {r['record']} | {r['win_pct']:.1f}% | {u_str} | {roi_str} | {r['clv_beat_pct']:.1f}% | {r['kelly_units']:+.2f}u | {r['kelly_roi_pct']:+.1f}% |")
-
-    if guard_metrics['bets'] > 0:
-        saved = -guard_metrics['units']
-        saved_str = f"+{saved:.2f}u" if saved > 0 else "0.00u"
-        md_lines.append(f"| 🛡️ *Injury/RLM Suppressed (Saved)* | {guard_metrics['bets']} | {guard_metrics['record']} | - | Would PnL: {guard_metrics['units']:+.2f}u | Saved: **{saved_str}** | - | - | - |")
+    md_lines.append("### In-week decisions (promotion sample)\n")
+    md_table(summary_rows, guard_metrics)
+    if legacy is not None:
+        md_lines.append("\n### Legacy (excluded from promotion)\n")
+        md_table(*legacy)
 
     md_lines.append("\n### 📋 Active Slate Head-to-Head Comparison\n")
     md_lines.append("| Matchup | Market Spread | v1 Baseline | v2 Elo/Rest | v3 EPA-Enhanced | v4 Full Matrix | Consensus |")
@@ -789,26 +1000,16 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df):
         print(f"Warning: Could not write to $GITHUB_STEP_SUMMARY: {exc}")
 
 
+# Columns are appended, never reordered. CLV Beat/Tie/Lose % are shares of bets with a close.
 SCORECARD_HEADER = (
     "Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %",
     "CLV Tie %", "Avg CLV Pts", "Avg CLV Win Prob", "Kelly Units", "Kelly ROI %",
+    "CLV Lose %", "Avg CLV Fair Prob", "Avg CLV Fair Prob SE",
 )
 
 
-def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
-    """Writes or overwrites the Model_Scorecard tab in Google Sheets."""
-    now_utc_str = datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    now_et_str = datetime.now(pytz.timezone(LOCAL_TZ)).strftime("%Y-%m-%d %I:%M %p %Z")
-
-    rows = []
-    rows.append(["NFL MULTI-MODEL PERFORMANCE SCORECARD", "", "", "", "", "", "", "", ""])
-    rows.append([f"Updated: {now_utc_str} ({now_et_str})", "", "", "", "", "", "", "", ""])
-    rows.append([""])
-
-    # Section 1: Summary Table
-    rows.append(["MODEL PERFORMANCE SUMMARY", "", "", "", "", "", "", "", ""])
-    rows.append(list(SCORECARD_HEADER))
-
+def _sheet_summary_block(summary_rows, guard_metrics):
+    rows = [list(SCORECARD_HEADER)]
     for r in summary_rows:
         rows.append([
             r["model"],
@@ -824,9 +1025,11 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             f"{r.get('avg_clv_prob_pct', 0.0):+.2f}%",
             f"{r['kelly_units']:+.2f}u",
             f"{r['kelly_roi_pct']:+.1f}%",
+            f"{r.get('clv_lose_pct', 0.0):.1f}%",
+            f"{r.get('avg_clv_fair_prob_pct', 0.0):+.2f}%",
+            f"{r.get('clv_fair_se_pct', 0.0):.2f}%",
         ])
 
-    # Guard Audit row
     g_bets = guard_metrics["bets"]
     if g_bets > 0:
         saved = -guard_metrics["units"]
@@ -839,9 +1042,35 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df):
             f"Would PnL: {guard_metrics['units']:+.2f}u",
             f"Saved: {saved:+.2f}u",
         ] + ["-"] * (len(SCORECARD_HEADER) - 7))
+    return rows
+
+
+def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=None):
+    """Writes or overwrites the Model_Scorecard tab in Google Sheets.
+
+    summary_rows/guard_metrics are the in-week block; legacy = (summary_rows, guard_metrics)
+    is written below it as a separate block excluded from promotion.
+    """
+    now_utc_str = datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_et_str = datetime.now(pytz.timezone(LOCAL_TZ)).strftime("%Y-%m-%d %I:%M %p %Z")
+
+    rows = []
+    rows.append(["NFL MULTI-MODEL PERFORMANCE SCORECARD", "", "", "", "", "", "", "", ""])
+    rows.append([f"Updated: {now_utc_str} ({now_et_str})", "", "", "", "", "", "", "", ""])
+    rows.append([""])
+
+    # Section 1: Summary Table (in-week decisions: the promotion sample)
+    rows.append(["MODEL PERFORMANCE SUMMARY: IN-WEEK DECISIONS (promotion sample)", "", "", "", "", "", "", "", ""])
+    rows.extend(_sheet_summary_block(summary_rows, guard_metrics))
 
     rows.append([""])
     rows.append([""])
+
+    if legacy is not None:
+        rows.append([f"LEGACY (excluded from promotion): look-ahead v1 picks, shadow rows logged before {SHADOW_LEGACY_CUTOFF_UTC}"])
+        rows.extend(_sheet_summary_block(*legacy))
+        rows.append([""])
+        rows.append([""])
 
     # Section 2: Weekly CLV (promotion rule condition 3)
     w_header, w_rows = weekly_clv_table(summary_rows)
@@ -1001,18 +1230,20 @@ def main():
         scores = load_final_scores(SEASON)
         print(f"Loaded finalized scores for {len(scores)} games in season {SEASON}.")
 
-    # 3. Grade & Aggregate Performance
-    summary_rows, guard_metrics, counts = evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=v4_df)
+    # 3. Grade & Aggregate Performance, in-week and legacy kept apart
+    blocks = evaluate_regimes(master_df, v2_df, v3_df, scores, v4_df=v4_df)
+    summary_rows, guard_metrics, counts = blocks[IN_WEEK]
+    legacy = blocks[LEGACY][:2]
 
     # 4. Build Active Slate Comparison
     slate_df = build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=v4_df)
 
     # 5. Output to Console, GitHub Actions, and Google Sheets
-    print_terminal_dashboard(summary_rows, guard_metrics, slate_df)
-    publish_github_summary(summary_rows, guard_metrics, slate_df)
+    print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=legacy)
+    publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=legacy)
 
     if has_creds and not args.test:
-        write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df)
+        write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=legacy)
 
     print("Multi-Model comparison complete.")
 

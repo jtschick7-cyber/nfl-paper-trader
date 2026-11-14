@@ -24,7 +24,8 @@ from src.model_v2_core import (
     safe_float,
 )
 from src.odds_utils import get_cached_live_home_spread
-from src.sheet_utils import get_sheet_as_df
+from src.artifacts import artifact_id as build_artifact_id
+from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.v2_sheet_utils import get_or_create_worksheet
 
 MODEL_PATH = "models/nfl_spread_model_v2.pkl"
@@ -72,7 +73,12 @@ HEADERS = [
     "v2_decision",
     "v1_pick",
     "notes",
+    # Appended in R2; never reorder.
+    "artifact_id",
+    "decision_regime",
 ]
+
+DECISION_REGIME = "in_week"
 
 
 def clean(value):
@@ -119,24 +125,18 @@ def has_pick(value):
 
 
 def ensure_headers(ws):
-    try:
-        first = ws.row_values(1)
-    except Exception:
-        first = []
+    ensure_tab_headers(ws, HEADERS)
 
-    if not first:
-        ws.update([HEADERS], "A1")
-        return
 
-    if first[0] != HEADERS[0]:
-        raise SystemExit(
-            "V2_Shadow tab exists but headers do not match expected headers.\n"
-            + "Expected first header: "
-            + HEADERS[0]
-            + "\n"
-            + "Found first header: "
-            + str(first[0])
-        )
+def shadow_decision(best_edge, recommendation):
+    """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
+    if best_edge < MIN_EDGE_THRESHOLD:
+        return "PASS"
+    if recommendation == "SUPPRESS":
+        return "SUPPRESS_DANGER"
+    if recommendation == "MANUAL_REVIEW":
+        return "MANUAL_REVIEW"
+    return "SHADOW_PICK"
 
 
 def main():
@@ -155,6 +155,7 @@ def main():
         )
 
     artifact = joblib.load(MODEL_PATH)
+    artifact_id = build_artifact_id(MODEL_PATH, artifact, "v2")
 
     feature_columns = artifact["feature_columns"]
     scaler = artifact["scaler"]
@@ -166,6 +167,7 @@ def main():
     calibrator = (calibration_method, calibration_params)
 
     print("Model version: " + MODEL_VERSION)
+    print("Artifact: " + artifact_id)
     print("Sigma: " + str(round(sigma, 4)))
     print("Calibration method: " + str(calibration_method))
     print("Calibration params: " + str(calibration_params))
@@ -374,15 +376,7 @@ def main():
             max_auto_edge=MAX_AUTO_EDGE,
         )
 
-        if best_edge >= MIN_EDGE_THRESHOLD:
-            if alert.recommendation == "SUPPRESS":
-                decision = "SUPPRESS_DANGER"
-            elif alert.recommendation == "MANUAL_REVIEW":
-                decision = "MANUAL_REVIEW"
-            else:
-                decision = "SHADOW_PICK"
-        else:
-            decision = "PASS"
+        decision = shadow_decision(best_edge, alert.recommendation)
 
         v1_pick = ""
 
@@ -447,6 +441,8 @@ def main():
                 clean(decision),
                 clean(v1_pick),
                 clean("; ".join(notes)),
+                clean(artifact_id),
+                clean(DECISION_REGIME),
             ]
         )
 

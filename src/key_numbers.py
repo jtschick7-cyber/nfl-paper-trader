@@ -221,3 +221,22 @@ def calculate_expected_value(p_win, p_loss, american_odds):
     b = payout_multiplier(american_odds)
     ev = (p_win * b) - (p_loss * 1.0)
     return float(ev)
+
+
+def market_implied_mean(home_line, fair_home, sigma, total_line=None):
+    """
+    Mean home margin at which the no-push home cover probability at `home_line` equals
+    `fair_home` (a de-vigged market probability). Cover probability rises with the mean,
+    so a 60-step bisection over [-home_line - 20, -home_line + 20] pins it down.
+    """
+    home_line = float(home_line)
+    target = float(fair_home)
+    lo, hi = -home_line - 20.0, -home_line + 20.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        p = calculate_spread_probabilities(mid, sigma, home_line, total_line)["cond_home_win"]
+        if p < target:
+            lo = mid
+        else:
+            hi = mid
+    return float(0.5 * (lo + hi))

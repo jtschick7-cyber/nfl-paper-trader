@@ -87,3 +87,31 @@ def test_payout_multiplier():
     assert pytest.approx(payout_multiplier(100.0), 1e-4) == 1.0
     assert pytest.approx(payout_multiplier(120.0), 1e-4) == 1.20
     assert payout_multiplier(0.0) == 1.0
+
+
+@pytest.mark.parametrize(
+    "home_line, fair_home, expected",
+    [
+        (-3.0, 0.5000, 2.791),
+        (-3.0, 0.4566, 1.483),
+        (-2.5, 0.5000, 1.465),
+        (-7.5, 0.5000, 8.625),
+        (7.5, 0.5000, -8.625),
+        (-10.0, 0.5000, 10.578),
+    ],
+)
+def test_market_implied_mean_reference_values(home_line, fair_home, expected):
+    from src.key_numbers import market_implied_mean
+
+    sigma = 12.8145
+    mean = market_implied_mean(home_line, fair_home, sigma)
+    assert mean == pytest.approx(expected, abs=0.01)
+    round_trip = calculate_spread_probabilities(mean, sigma, home_line)["cond_home_win"]
+    assert round_trip == pytest.approx(fair_home, abs=1e-6)
+
+
+def test_market_implied_mean_with_total_line_round_trips():
+    from src.key_numbers import market_implied_mean
+
+    mean = market_implied_mean(-3.0, 0.53, 13.1, total_line=38.5)
+    assert calculate_spread_probabilities(mean, 13.1, -3.0, 38.5)["cond_home_win"] == pytest.approx(0.53, abs=1e-6)
