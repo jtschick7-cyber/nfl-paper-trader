@@ -43,16 +43,16 @@ A game is decided only in the run where it is **decidable**: its week is the sma
 A shadow model (v2, v3 or v4) replaces v1 only if all of these hold at a weekly checkpoint (after the Tuesday scorecard):
 1. **Sample:** at least **40 graded bets with a recorded close**, across at least **6 different weeks**.
 2. **Beats the close:** **Avg CLV Fair Prob ≥ +0.5%** over all those bets.
-3. **Holds up week to week:** Avg CLV Win Prob is positive in **at least 60% of the weeks** it bet.
+3. **Holds up week to week:** Avg CLV Fair Prob is positive in **at least 60% of the weeks** it bet.
 4. **Beats v1:** its Avg CLV Fair Prob is at least **0.5 points higher than v1's** over the same weeks.
 5. **Profit is reported but not required.** At 40 bets it's mostly noise.
-6. **Timing:** if two models qualify, the one with the higher Avg CLV Win Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
+6. **Timing:** if two models qualify, the one with the higher Avg CLV Fair Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
 
 Only the scorecard's **in-week** block counts: v1 bets with `decision_regime = in_week`, and shadow rows logged from 2026-11-03 00:00 UTC for games decided in-week. Look-ahead v1 picks and older shadow rows are shown in a separate **Legacy (excluded from promotion)** block.
 
 **Avg CLV Fair Prob** (price-aware) is the fair probability of the ticket at the close minus its fair probability when taken. The closing home line and its de-vigged price at the primary book fix the market's mean margin (`market_implied_mean` in `src/key_numbers.py`); the ticket's no-push cover probability under that mean is compared with the de-vigged probability of the price taken. It uses the single-book close (`closing_line`, `closing_odds`, `closing_away_odds`) because the consensus line has no price; a bet without closing prices falls back to the line-only number. The scorecard shows its standard error next to it.
 
-**Avg CLV Win Prob** (line only) is the average change in cover probability between the line taken and the closing line, ignoring price; it is kept for continuity. For condition 3, the scorecard's **Weekly Avg CLV Win Prob** table shows each model's average by week and its positive weeks (`Weeks +`); only weeks with at least one bet that has a recorded close count.
+**Avg CLV Win Prob** (line only) is the average change in cover probability between the line taken and the closing line, ignoring price; it is kept for comparison and is not used by any promotion condition. For condition 3, the scorecard's **Weekly Avg CLV Fair Prob** table shows each model's Avg CLV Fair Prob by week and its positive weeks (`Weeks +`); only weeks with at least one bet that has a recorded close count.
 
 **How much 40 bets can tell you.** The per-bet CLV has a standard deviation of about 5.5 points, so the standard error of a 40-bet average is about 0.9 points: 40 bets cannot separate a true +0.5% from zero. Read conditions 2 and 4 together with the SE column; the thresholds themselves are the owner's call and have not been changed.
 

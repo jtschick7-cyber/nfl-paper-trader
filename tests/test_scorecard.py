@@ -157,7 +157,7 @@ def test_sheet_has_weekly_clv_section(monkeypatch):
 
     cm.write_google_sheet_scorecard(summary, guard, pd.DataFrame())
 
-    title_idx = next(i for i, r in enumerate(ws.values) if r and str(r[0]).startswith("WEEKLY AVG CLV WIN PROB"))
+    title_idx = next(i for i, r in enumerate(ws.values) if r and str(r[0]).startswith("WEEKLY AVG CLV FAIR PROB"))
     assert ws.values[title_idx + 1] == ["Model", "Tier", "Weeks +", "Wk 9", "Wk 10"]
     row = ws.values[title_idx + 2]
     assert row[0] == "Model v1 (Master_Bets Baseline)"
@@ -280,3 +280,18 @@ def test_sheet_has_separate_legacy_block(monkeypatch):
     assert ws.values[summary_idx + 1][2] == 0  # in-week block is empty
     # weekly CLV (promotion input) is built from in-week rows only: no week columns
     assert ws.values[weekly_idx + 1] == ["Model", "Tier", "Weeks +"]
+
+
+def test_weekly_clv_uses_price_aware_number_when_prices_exist():
+    # Same line at the close, but the price moved against the pick: line-only CLV is 0,
+    # the price-aware number is negative, and the week must count as not positive.
+    priced = cm.grade_single_bet(
+        "HOME", -3.0, -110, 24, 20, closing_line=-3.0, week=12,
+        open_home_odds=-110, open_away_odds=-110,
+        close_single_line=-3.0, close_home_odds=105, close_away_odds=-125,
+    )
+    assert priced["clv_prob"] == pytest.approx(0.0)
+    assert priced["clv_fair_prob"] < 0
+    m = cm.compute_metrics([priced], "test")
+    assert m["weekly_clv_prob_pct"][12] == pytest.approx(priced["clv_fair_prob"] * 100.0, abs=0.01)
+    assert m["clv_positive_weeks"] == 0

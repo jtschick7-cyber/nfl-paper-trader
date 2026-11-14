@@ -7,7 +7,6 @@
 - **Next task:** **R3, raw-lean tracking.** Spec: `notes/implementation-plan/R3-raw-lean-tracking.md`. Owner question for R3 is in the plan README table.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
 - **After R2 merges and the next scorecard refresh:** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
-- **Open question for the owner:** promotion conditions 3 (weekly) and 6 (tie-break) still use line-only Avg CLV Win Prob; the spec only moved 2 and 4. Switch them too?
 
 ## Task queue
 
@@ -28,9 +27,9 @@
 - Loggers: `shadow_decision()` returns `PASS` below `MIN_EDGE_THRESHOLD` whatever the guard says. Scorecard counts `SUPPRESS_DANGER` only at or above the threshold.
 - `compare_models`: `SHADOW_LEGACY_CUTOFF_UTC`, `parse_logged_at` (both formats), `evaluate_all_models(regime=...)`, `evaluate_regimes`. In-week block first, then "Legacy (excluded from promotion)"; weekly CLV is in-week only.
 - Price-aware CLV: `clv_fair_probability` + `key_numbers.market_implied_mean` (matches the spec table). Scorecard appends `CLV Lose %`, `Avg CLV Fair Prob`, `Avg CLV Fair Prob SE`; beat/tie/lose are now shares of all bets with a close.
-- README: promotion conditions 2 and 4 use Avg CLV Fair Prob on in-week rows; 40-bet SE note; v3/v4 cannot reach 2% at −110; `edge` scale change on 2026-11-02; `clv_points` not authoritative.
+- README: every promotion condition (2, 3, 4, 6) uses Avg CLV Fair Prob on in-week rows (owner agreed to 3 and 6 on 2026-11-14; weekly table switched too); 40-bet SE note; v3/v4 cannot reach 2% at −110; `edge` scale change on 2026-11-02; `clv_points` not authoritative.
 - Offline run on the 11-13 dump (scores from `game_result`): in-week block empty; legacy v1 18, v2 6, v3 4; guard 3 (TEN@CIN, NYJ@KC, ARI@SEA).
-- `pytest tests/`: 138 passed (33 new). One existing assertion changed on purpose: beat % in `test_ties_reported_separately_from_beat_rate` is now 25 (share of all bets), not 50.
+- `pytest tests/`: 139 passed (34 new). One existing assertion changed on purpose: beat % in `test_ties_reported_separately_from_beat_rate` is now 25 (share of all bets), not 50.
 
 ### 2026-11-14: R1 decision timing
 

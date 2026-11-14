@@ -243,12 +243,17 @@ def bet_week(row, game_id):
 
 
 def weekly_clv_prob(clv_evaluated):
-    """Average CLV win probability (in %) per week, over bets with a recorded close."""
+    """
+    Average price-aware CLV (Avg CLV Fair Prob, in %) per week, over bets with a recorded
+    close. A bet without closing prices contributes its line-only number (clv_fair_prob
+    already falls back to clv_prob).
+    """
     by_week = {}
     for b in clv_evaluated:
-        if b.get("week") is None or b.get("clv_prob") is None:
+        val = b.get("clv_fair_prob", b.get("clv_prob"))
+        if b.get("week") is None or val is None:
             continue
-        by_week.setdefault(int(b["week"]), []).append(b["clv_prob"])
+        by_week.setdefault(int(b["week"]), []).append(val)
     return {w: sum(p) / len(p) * 100.0 for w, p in sorted(by_week.items())}
 
 
@@ -417,7 +422,7 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "avg_clv_fair_prob_pct": round(avg_clv_fair_prob_pct, 2),
         "clv_fair_se_pct": round(clv_fair_se_pct, 2),
         "clv_fair_priced": clv_fair_priced,
-        # Promotion rule condition 3: share of weeks with a positive Avg CLV Win Prob
+        # Promotion rule condition 3: share of weeks with a positive Avg CLV Fair Prob
         "weekly_clv_prob_pct": {w: round(v, 2) for w, v in weekly.items()},
         "clv_weeks": len(weekly),
         "clv_positive_weeks": sum(1 for v in weekly.values() if v > 0),
@@ -874,7 +879,7 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
 
 
 def weekly_clv_table(summary_rows):
-    """Header + one row per model: positive weeks, then Avg CLV Win Prob for each week."""
+    """Header + one row per model: positive weeks, then Avg CLV Fair Prob for each week."""
     weeks = sorted({w for r in summary_rows for w in r.get("weekly_clv_prob_pct", {})})
     header = ["Model", "Tier", "Weeks +"] + [f"Wk {w}" for w in weeks]
     rows = []
@@ -928,7 +933,7 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=None)
         print("=" * 94)
 
     w_header, w_rows = weekly_clv_table(summary_rows)
-    print("\nWEEKLY AVG CLV WIN PROB (promotion rule: positive in >= 60% of weeks bet)")
+    print("\nWEEKLY AVG CLV FAIR PROB (promotion rule: positive in >= 60% of weeks bet)")
     print(" | ".join([f"{w_header[0]:<35}", f"{w_header[2]:<12}"] + [f"{h:>7}" for h in w_header[3:]]))
     for wr in w_rows:
         print(" | ".join([f"{wr[0]:<35}", f"{wr[2]:<12}"] + [f"{v:>7}" for v in wr[3:]]))
@@ -1074,7 +1079,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=N
 
     # Section 2: Weekly CLV (promotion rule condition 3)
     w_header, w_rows = weekly_clv_table(summary_rows)
-    rows.append(["WEEKLY AVG CLV WIN PROB (promotion rule: positive in >= 60% of weeks bet)"])
+    rows.append(["WEEKLY AVG CLV FAIR PROB (promotion rule: positive in >= 60% of weeks bet)"])
     rows.append(w_header)
     rows.extend(w_rows)
 
