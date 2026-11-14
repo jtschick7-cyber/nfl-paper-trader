@@ -135,11 +135,16 @@ Useful commands:
 ```bash
 python -m src.build_features          # refresh EPA feature caches
 python -m src.train_model_v4          # retrain v4 (constrained ridge + market blend + calibrator)
-python -m src.backtest_epa --test-seasons 2024 2025   # walk-forward backtest
+python -m src.backtest_production     # walk-forward backtest of the live shadow rule (v3; --model v4)
+python -m src.backtest_epa --test-seasons 2024 2025   # older backtest; does not model the live rule
 python -m src.compare_models          # rebuild the scorecard
 ```
 
-Backtests are walk-forward with no lookahead. Small high-edge subsets from past backtests were too small to mean anything and are no longer quoted here; judge the models on the live scorecard's CLV, which needs far fewer bets than win rate to separate skill from noise.
+Backtests are walk-forward with no lookahead. Small high-edge subsets from past backtests were too small to mean anything and are no longer quoted here.
+
+`src/backtest_production.py` (R4) tests the rule the shadow loggers actually run. Both share `src/decision.py` (blend by β, key-number probabilities, calibrator, break-even edge). Each test season (2014–2025) gets its own ridge, β and calibrator fitted on earlier seasons only, and every game is also re-run with zero model disagreement, so a pick that comes from the price or line number alone shows up. It uses nflverse closing lines and prices, so it tests the rule against the close, not the in-week opener. Its report and `data/backtest_production_*.csv` are the baseline any model or rule change (R5 first) must beat. `src/backtest_epa.py` and `src/backtest_model.py` do not model the market blend or the break-even edge, so they do not test the production rule.
+
+Judge a model change on both: the production backtest first, then the live scorecard's CLV, which needs far fewer bets than win rate to separate skill from noise.
 
 ---
 

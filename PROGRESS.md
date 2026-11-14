@@ -2,12 +2,12 @@
 
 ## Current state
 
-- **Branch:** `claude/r3-raw-lean-tracking` (PR open). R1 merged as PR #14, R2 as PR #15.
-- **Last task:** R3, raw-lean tracking (2026-11-14).
-- **Next task:** **R4, production backtest.** Spec: `notes/implementation-plan/R4-production-backtest.md`.
+- **Branch:** `claude/r4-production-backtest` (PR open). R1 merged as PR #14, R2 as PR #15, R3 as PR #16.
+- **Last task:** R4, production backtest (2026-11-14).
+- **Next task:** **R5, price-consistent anchor.** Spec: `notes/implementation-plan/R5-price-consistent-anchor.md`. Owner question for R5 (retire v4?) is in the plan README table. Baseline to beat: R4's PR description.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
 - **After the next scorecard refresh (R2 merged):** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
-- **After R3 merges:** run the "Backfill raw leans" workflow as a dry run, review it (expect V2 57, V3 27 with 19 at ≥ 1.5 pts and 93 pre-fix skipped, V4 42 with 2 blank sides, plus any rows logged since 11-13), then once with `apply`. After the next Tuesday run: new shadow rows end with `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side`, and `Model_Scorecard` ends with the raw-lean section.
+- **After R3 merged (PR #16):** run the "Backfill raw leans" workflow as a dry run, review it (expect V2 57, V3 27 with 19 at ≥ 1.5 pts and 93 pre-fix skipped, V4 42 with 2 blank sides, plus any rows logged since 11-13), then once with `apply`. After the next Tuesday run: new shadow rows end with `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side`, and `Model_Scorecard` ends with the raw-lean section.
 
 ## Task queue
 
@@ -16,10 +16,21 @@
 | R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR #14), live check pending |
 | R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR), live check pending |
 | R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR), backfill and live check pending |
-| R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | not started (independent of R1–R3) |
+| R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | done (PR) |
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | not started (needs R4, R2) |
 
 ## Log
+
+### 2026-11-14: R4 production backtest
+
+- `src/decision.py`: `shadow_decision` (blend, key numbers, calibrator, break-even edges, `PICK`/`PASS` before the guard). v2/v3/v4 loggers call it; a characterization test copies the old inline code and matches it to 1e-9 (1,211 cases: three models, totals, integer and half-point lines, five calibrator kinds).
+- Locks: v3 today cannot bet at −110/−110 up to 60 pts disagreement (R5 expected to change); zero disagreement at −3, +110/−130 picks, as `xfail(strict)` named for R5.
+- `src/backtest_production.py`: walk-forward 2014–2025, ridge/β/calibrator per fold on earlier seasons only (ids recorded and tested), zero-disagreement probe, CSVs to `data/backtest_production_*.csv` (gitignored). v4 behind `--model v4`.
+- Check: fitting on all of 2012–2025 reproduces the committed v3 artifact exactly (β, SE, calibrator). Needed a stable sort: ties in kickoff time otherwise moved β to 0.0349.
+- v3 baseline: 149 bets in 3,150 games, 47.5% ± 4.2, −0.4u; 117 at +105 or longer, 104 also probe picks; no bets 2023–2025 (closing prices top out at +105); raw-lean hit 50.4% ± 0.9.
+- β per fold 0.04–0.33; early folds are small (SE 0.13–0.20), 2019+ fall in 0.07–0.13 with SE 0.07–0.10.
+- README: command listed; old backtests flagged as not modelling the live rule; "judge on the live scorecard alone" now says production backtest first.
+- `pytest tests/`: 1,391 passed, 1 xfailed (1,219 new, nearly all the parametrized characterization test).
 
 ### 2026-11-14: R3 raw-lean tracking
 

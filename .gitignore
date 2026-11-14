@@ -21,3 +21,4 @@ chat-export*.json
 .claude/settings.local.json
 .claude/worktrees/
 data/sheet_dump/
+data/backtest_production_*.csv
