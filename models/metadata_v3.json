@@ -10,12 +10,22 @@
     "diff_rest",
     "division"
   ],
-  "sigma": 12.814507752638638,
+  "sigma": 12.795304952822438,
   "model_sigma": 13.241890519965954,
-  "market_beta": 0.03693757162735288,
-  "market_beta_se": 0.07103815727025857,
+  "anchor": "price",
+  "anchor_variant": "A",
+  "market_beta": 0.021186236367862495,
+  "market_beta_se": 0.07040388923649274,
   "blend_rows": 3050,
-  "blend_sigma": 12.814507752638638,
+  "blend_sigma": 12.795304952822438,
+  "anchor_price_assumed_rows": 1,
+  "calibrator_diagnostic_method": "logistic",
+  "calibrator_diagnostic_params": [
+    2.2347032104410977e-16,
+    0.6082877970039433
+  ],
+  "calibrator_diagnostic_slope": 0.6082877970039433,
+  "calibrator_diagnostic_se": 0.6038497377527307,
   "rmse": 13.241890519965954,
   "r2": 0.15547732290207705,
   "coefficients": {
@@ -29,11 +39,8 @@
     "division": -0.1616
   },
   "intercept": 1.9363909363909364,
-  "calibrator_method": "logistic",
-  "calibrator_params": [
-    0.0,
-    0.36136814753333507
-  ],
+  "calibrator_method": "identity",
+  "calibrator_params": null,
   "train_rows": 3663,
   "trained_seasons": [
     2012,

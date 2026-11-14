@@ -125,7 +125,9 @@ def current_betas():
     for prefix, path in TABS.values():
         artifact = joblib.load(path)
         beta = artifact.get("market_beta") if isinstance(artifact, dict) else None
-        if beta:
+        # A price-anchored artifact (R5) logs its raw lean itself; the line-anchor
+        # unblend formula does not apply to its mu, so its rows are never backfilled.
+        if beta and artifact.get("anchor") is None:
             out[artifact_id(path, artifact, prefix)] = float(beta)
     return out
 

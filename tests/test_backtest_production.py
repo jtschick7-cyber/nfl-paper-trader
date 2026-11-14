@@ -89,3 +89,64 @@ def test_season_table_counts_low_input_and_long_price_bets():
     assert r["units"] == pytest.approx(0.15) and r["roi_pct"] == pytest.approx(7.5)
     assert r["low_input_bets"] == 1 and r["long_price_bets"] == 1 and r["probe_picks"] == 1
     assert r["hit_pct"] == pytest.approx(50.0)
+
+
+# --- R5: price-consistent anchor -------------------------------------------------------
+
+def _priced(seed=0):
+    ds = _synthetic(seed=seed, probe_game="2014_050")
+    long_idx = ds.index[ds["season"] == 2014][::9]
+    ds.loc[long_idx, ["home_spread_odds", "away_spread_odds"]] = [110.0, -130.0]
+    return ds
+
+
+@pytest.mark.parametrize("variant", ["A", "B"])
+def test_price_anchor_probe_never_picks_and_returns_the_market_probability(variant):
+    ds = _priced()
+    games, folds = bp.walk_forward(ds, bp.v3_spec(), [2014], anchor="price", variant=variant)
+    assert (games["probe_decision"] != PICK).all()
+    assert (games["line_probe_decision"] != PICK).all()
+    assert (games["probe_p_home"] - games["q_home"]).abs().max() < 1e-6
+    assert "2014_050" in set(games["game_id"])
+    f = folds[0]
+    assert f["calibrator"] == ("identity", None)
+    assert f["anchor"] == "price" and f["variant"] == variant
+    assert np.isfinite(f["calibrator_diagnostic_slope"]) and f["calibrator_diagnostic_se"] > 0
+
+
+def test_price_anchor_folds_do_not_leak():
+    ds = _priced()
+    games, folds = bp.walk_forward(ds, bp.v3_spec(), [2013, 2014], anchor="price", variant="A")
+    for f in folds:
+        for key in ("train_ids", "blend_ids", "calibration_ids"):
+            assert f[key] and not (f[key] & f["test_ids"]), key
+
+
+def test_line_anchor_is_still_the_default_and_unchanged():
+    ds = _synthetic(probe_game="2014_050")
+    a, _ = bp.walk_forward(ds, bp.v3_spec(), [2014])
+    b, _ = bp.walk_forward(ds, bp.v3_spec(), [2014], anchor="line")
+    pd.testing.assert_frame_equal(a, b)
+    assert "2014_050" in set(bp.probe_table(a)["game_id"])
+
+
+def test_calibration_table_reports_standard_errors():
+    games = pd.DataFrame({"p_home_cal": [0.45] * 300 + [0.55] * 300,
+                          "home_cover": [True] * 135 + [False] * 165 + [True] * 120 + [False] * 180})
+    t = bp.calibration_table(games)
+    lo = t[t["mean_p_home_cal"] < 0.5].iloc[0]
+    hi = t[t["mean_p_home_cal"] > 0.5].iloc[0]
+    assert lo["n"] == 300 and lo["home_cover_pct"] == pytest.approx(45.0)
+    assert lo["se_pct"] == pytest.approx(100 * (0.45 * 0.55 / 300) ** 0.5)
+    assert bool(lo["within_2se"])
+    assert hi["home_cover_pct"] == pytest.approx(40.0) and not bool(hi["within_2se"])
+
+
+def test_fit_metrics_for_variant_choice():
+    games = pd.DataFrame({"p_home_cal": [0.6, 0.4, 0.5], "home_cover": [True, False, None],
+                          "mu_blend": [3.0, -1.0, 0.0], "home_margin": [7.0, -3.0, 2.0]})
+    m = bp.fit_metrics(games)
+    assert m["n_cover"] == 2
+    assert m["log_loss"] == pytest.approx(-np.log(0.6))
+    assert m["brier"] == pytest.approx(0.16)
+    assert m["margin_rmse"] == pytest.approx(np.sqrt((16 + 4 + 4) / 3))

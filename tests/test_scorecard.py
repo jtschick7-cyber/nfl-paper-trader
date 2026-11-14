@@ -431,3 +431,40 @@ def test_sheet_has_raw_lean_section_with_legacy_block(monkeypatch):
     assert v3_all[2] == 1
     assert all(len(row) == len(cm.RAW_LEAN_HEADER) for row in ws.values[main_idx + 1:legacy_idx] if row and str(row[0]).startswith("Model"))
     assert any(str(row[0]).startswith("Registered test: v3 has 1/100") for row in ws.values if row)
+
+
+# --- R5: one in-week line per artifact ---------------------------------------------
+
+OLD_V3 = "v3_2012-2025_aaaaaaaa"
+NEW_V3 = "v3_2012-2025_bbbbbbbb"
+
+
+def test_in_week_block_gives_each_v3_artifact_its_own_line():
+    gids = ["2026_12_NYJ_BUF", "2026_12_DAL_NYG", "2026_13_KC_LV"]
+    master = pd.DataFrame([{"game_id": g, "decision_regime": "in_week", "closing_line": -4.0} for g in gids])
+    v3 = pd.DataFrame([
+        _with(_v3_pick(gids[0], "0.60", week=12), logged_at_utc=IN_WEEK_TS, artifact_id=OLD_V3),
+        _with(_v3_pick(gids[1], "0.60", week=12), logged_at_utc=IN_WEEK_TS, artifact_id=OLD_V3),
+        # same game re-logged by the new artifact: graded under the new artifact's own line
+        _with(_v3_pick(gids[1], "0.51", week=12), logged_at_utc=IN_WEEK_TS, artifact_id=NEW_V3,
+              v3_decision="PASS", v3_edge="0.004"),
+        _with(_v3_pick(gids[2], "0.60", week=13), logged_at_utc=IN_WEEK_TS, artifact_id=NEW_V3),
+    ])
+    scores = {g: {"home_score": 24, "away_score": 21} for g in gids}
+    summary = cm.evaluate_regimes(master, pd.DataFrame(), v3, scores)["in_week"][0]
+    by_model = {r["model"]: r for r in summary}
+    # merged line unchanged: each game's first row, whichever artifact logged it
+    assert by_model["Model v3 (EPA + Discrete Keys)"]["bets"] == 3
+    assert by_model[f"Model v3 [{OLD_V3}]"]["bets"] == 2
+    assert by_model[f"Model v3 [{NEW_V3}]"]["bets"] == 1
+    names = [r["model"] for r in summary]
+    assert names.index(f"Model v3 [{OLD_V3}]") > names.index("Model v3 (EPA + Discrete Keys)")
+
+
+def test_single_artifact_adds_no_extra_line():
+    master = pd.DataFrame([{"game_id": "2026_12_NYJ_BUF", "decision_regime": "in_week", "closing_line": -4.0}])
+    v3 = pd.DataFrame([_with(_v3_pick("2026_12_NYJ_BUF", "0.60", week=12), logged_at_utc=IN_WEEK_TS,
+                             artifact_id=NEW_V3)])
+    scores = {"2026_12_NYJ_BUF": {"home_score": 24, "away_score": 21}}
+    summary = cm.evaluate_regimes(master, pd.DataFrame(), v3, scores)["in_week"][0]
+    assert not any(r["model"].startswith("Model v3 [") for r in summary)
