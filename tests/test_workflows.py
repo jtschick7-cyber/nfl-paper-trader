@@ -4,7 +4,13 @@ import os
 import yaml
 
 WORKFLOWS = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows")
-SHEET_WRITERS = ["tuesday_opening.yml", "nightly_results.yml", "v2_shadow_logger.yml", "v3_shadow_logger.yml"]
+SHEET_WRITERS = [
+    "tuesday_opening.yml",
+    "nightly_results.yml",
+    "v2_shadow_logger.yml",
+    "v3_shadow_logger.yml",
+    "migrate_lookahead_openers.yml",
+]
 
 
 def _load(name):

@@ -22,6 +22,7 @@ import pandas as pd
 import pytz
 
 from src.config import GSHEET_CREDENTIALS, MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON, SPREADSHEET_ID
+from src.decision_window import capped_rest, decision_guard, print_missing_results, row_is_decidable
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.injury_guard import audit_candidate_pick
 from src.market_blend import blend_margin
@@ -272,6 +273,13 @@ def main():
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True, errors="coerce")
     completed_sched = sched.dropna(subset=["home_score", "away_score", "kickoff_utc"]).sort_values("kickoff_utc").reset_index(drop=True)
 
+    season_sched = sched[pd.to_numeric(sched["season"], errors="coerce") == SEASON]
+    decision_week, missing = decision_guard(sheet_df, season_sched, now_utc)
+    if missing:
+        print_missing_results(missing)
+        return
+    print("Decision week: " + str(decision_week))
+
     # Connect to Google Sheets
     ws = get_or_create_worksheet(SHADOW_TAB)
     ensure_headers(ws)
@@ -292,6 +300,7 @@ def main():
     skipped_past = 0
     skipped_no_line = 0
     skipped_duplicate = 0
+    skipped_not_decidable = 0
 
     for idx, row in sheet_df.iterrows():
         game_id = str(row.get("game_id", "")).strip()
@@ -307,6 +316,10 @@ def main():
 
         if kickoff <= now_utc:
             skipped_past += 1
+            continue
+
+        if not row_is_decidable(row, now_utc, decision_week):
+            skipped_not_decidable += 1
             continue
 
         home = str(row.get("home_team", "")).strip().upper()
@@ -359,6 +372,12 @@ def main():
         a_div = DIVISION_MAP.get(away)
         division = 1.0 if h_div and a_div and h_div == a_div else 0.0
         elo_diff, diff_margin, diff_rest = get_point_in_time_context(completed_sched, home, away, kickoff)
+
+        # Rest from each team's latest SCHEDULED game (played or not), not its last
+        # completed one. v3/v4 convention: min(days, 21), 7 with no previous game.
+        diff_rest = float(
+            capped_rest(season_sched, home, kickoff, SEASON) - capped_rest(season_sched, away, kickoff, SEASON)
+        )
 
         feat_vals = {
             "elo_diff": elo_diff,
@@ -544,6 +563,7 @@ def main():
     print(f"Evaluated games: {evaluated}")
     print(f"Skipped past games: {skipped_past}")
     print(f"Skipped missing lines: {skipped_no_line}")
+    print(f"Skipped outside decision week: {skipped_not_decidable}")
     print(f"Skipped duplicates: {skipped_duplicate}\n")
 
     if not new_rows:
