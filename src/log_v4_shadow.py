@@ -25,6 +25,7 @@ import pandas as pd
 import pytz
 
 from src.config import GSHEET_CREDENTIALS, MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON, SPREADSHEET_ID
+from src.decision_window import capped_rest, decision_guard, print_missing_results, row_is_decidable
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.injury_guard import audit_candidate_pick
 from src.market_blend import blend_margin
@@ -275,6 +276,13 @@ def run_v4_shadow_evaluations():
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True, errors="coerce")
     completed_sched = sched.dropna(subset=["home_score", "away_score", "kickoff_utc"]).sort_values("kickoff_utc").reset_index(drop=True)
 
+    season_sched = sched[pd.to_numeric(sched["season"], errors="coerce") == SEASON]
+    decision_week, missing = decision_guard(sheet_df, season_sched, now_utc)
+    if missing:
+        print_missing_results(missing)
+        return
+    print("Decision week: " + str(decision_week))
+
     # Connect to Google Sheets if credentials are present
     has_creds = bool(os.getenv("GSHEET_CREDENTIALS") and os.getenv("SPREADSHEET_ID"))
     ws = None
@@ -314,6 +322,7 @@ def run_v4_shadow_evaluations():
     skipped_past = 0
     skipped_no_line = 0
     skipped_duplicate = 0
+    skipped_not_decidable = 0
 
     for idx, row in sheet_df.iterrows():
         game_id = str(row.get("game_id", "")).strip()
@@ -329,6 +338,10 @@ def run_v4_shadow_evaluations():
 
         if kickoff <= now_utc:
             skipped_past += 1
+            continue
+
+        if not row_is_decidable(row, now_utc, decision_week):
+            skipped_not_decidable += 1
             continue
 
         home = str(row.get("home_team", "")).strip().upper()
@@ -409,6 +422,12 @@ def run_v4_shadow_evaluations():
         a_div = DIVISION_MAP.get(away)
         division = 1.0 if h_div and a_div and h_div == a_div else 0.0
         elo_diff, diff_margin, diff_rest, past_gids = get_point_in_time_context(completed_sched, home, away, kickoff)
+
+        # Rest from each team's latest SCHEDULED game (played or not), not its last
+        # completed one. v3/v4 convention: min(days, 21), 7 with no previous game.
+        diff_rest = float(
+            capped_rest(season_sched, home, kickoff, SEASON) - capped_rest(season_sched, away, kickoff, SEASON)
+        )
 
         # Model v4 QB Shock & Turnover Luck
         diff_qb_shock = compute_point_in_time_qb_shock(qb_df, past_gids, home, away, h_pass_epa, a_pass_epa, starter_overrides=starter_overrides, window=8)
@@ -586,7 +605,7 @@ def run_v4_shadow_evaluations():
         existing_keys.add(key)
         evaluated += 1
 
-    print(f"Evaluated {evaluated} games (Skipped: {skipped_duplicate} duplicate, {skipped_past} past, {skipped_no_line} no-line).")
+    print(f"Evaluated {evaluated} games (Skipped: {skipped_duplicate} duplicate, {skipped_past} past, {skipped_no_line} no-line, {skipped_not_decidable} outside decision week).")
 
     if new_rows:
         # Group active pick rows by week and apply cap_slate_stakes per week

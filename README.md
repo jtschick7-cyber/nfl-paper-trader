@@ -30,6 +30,11 @@ The logistic calibrator is fit on out-of-sample cover outcomes. If its slope com
 ### Edge and staking
 Edge is the calibrated cover probability minus the break-even probability of the price actually taken (vig included), so a positive edge means positive expected value. Picks need `MIN_EDGE_THRESHOLD` (2%); edges above `MAX_AUTO_EDGE` (10%) are sent to manual review rather than auto-bet. Key-number push weights (3, 7, 6, 10, …) are in `src/key_numbers.py`.
 
+v1 bets flat stakes on at most `MAX_PICKS` (5) picks **per week**: each run may add only `MAX_PICKS` minus the picks already recorded for that week, highest edge first.
+
+### Decision window (`src/decision_window.py`)
+A game is decided only in the run where it is **decidable**: its week is the smallest week that still has a game kicking off after now, it kicks off within 7.5 days, and every current-season game that kicked off more than 5 hours ago has a final score. If a score is missing, the run captures nothing and picks nothing and a later run retries. Opening capture (on an Odds API response no more than 30 minutes old), v1 picks and the v2–v4 shadow evaluations all happen in that run. v1 picks a game only if its opening line was captured within `PICK_MAX_LINE_AGE_MINUTES` (90); an older line means the decision moment has passed. Each capture records `opening_book`, `opening_quote_at` and `decision_regime = in_week`; each pick records `pick_made_at`. Rest days count from each team's latest scheduled game, played or not. Rows with a blank `decision_regime` (and rows marked `lookahead`) were decided under the old timing, against openers up to ~10 days old, and are reported separately.
+
 ### 🛡️ Pre-bet safeguards (`src/injury_guard.py`)
 - **Reverse line movement**: lines moving ≥ 1.5 points against the pick side are suppressed and flagged `RLM_ALERT` at close.
 - **Model–market divergence**: a model margin more than 7 points from the line is treated as an unmodeled injury or weather shock and not auto-bet.
@@ -69,10 +74,11 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 
 | Workflow | When (UTC) | What |
 | :--- | :--- | :--- |
-| `tuesday_opening.yml` | Tue 15:17, 18:17, 23:17; Wed/Thu 18:17 | Schedule, opening lines, v1 picks, v2–v4 shadow logs, scorecard |
+| `tuesday_opening.yml` | Tue 15:17, 18:17, 23:17; Wed/Thu 18:17 | Schedule, then for the current decision week only (see **Decision window**): opening lines, v1 picks, v2–v4 shadow logs; scorecard. Later runs in the week only act if an earlier one stopped for missing results |
 | `closing_line_monitor.yml` | Gameday cron (Wed–Mon) | **Self-pacing closing loop** (below), then scorecard if settled bets got a close |
 | `nightly_results.yml` | Daily 05:17 | Catch up missed closes from cached snapshots, settle results, scorecard |
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
+| `migrate_lookahead_openers.yml` | Manual, one-off | R1 migration: move look-ahead openers for a later week out of the opening columns (dry run unless `apply` is ticked) |
 | `ci_tests.yml` | Push / PR to `main` | `pytest tests/` |
 
 ### On-time starts (`external_trigger/`)

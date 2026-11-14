@@ -13,13 +13,21 @@ from src.config import (
     MIN_EDGE_THRESHOLD,
     SEASON,
 )
+from src.decision_window import (
+    decision_guard,
+    previous_game_day,
+    print_missing_results,
+    rest_days,
+    row_is_decidable,
+)
 from src.injury_guard import audit_candidate_pick
 from src.key_numbers import is_integer_spread
-from src.model_utils import DIVISION_MAP, compute_snapshot, cover_probs
+from src.model_utils import DIVISION_MAP, _load_sched, compute_snapshot, cover_probs
 from src.odds_utils import american_to_implied_prob, get_cached_live_home_spread, remove_vig
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
 
-MAX_PICKS = int(os.getenv("MAX_PICKS", "5"))
+MAX_PICKS = int(os.getenv("MAX_PICKS", "5"))  # per week, not per run
+PICK_MAX_LINE_AGE_MINUTES = float(os.getenv("PICK_MAX_LINE_AGE_MINUTES", "90"))
 
 
 def load_model():
@@ -53,6 +61,129 @@ def has_existing_pick(value):
     return True
 
 
+def line_age_minutes(captured_at, now_utc):
+    ts = parse_kickoff(captured_at)
+    if pd.isna(ts):
+        return None
+    return (pd.Timestamp(now_utc) - ts).total_seconds() / 60.0
+
+
+def eligible_candidates(sheet_df, schedule_df, now_utc, max_line_age_minutes=PICK_MAX_LINE_AGE_MINUTES):
+    """Rows v1 may pick this run, with v1 rest days. Pure: no model, no I/O.
+
+    A candidate is OPEN_CAPTURED with an opening line, has no pick yet, is decidable,
+    and its opening was captured within max_line_age_minutes (an older line means the
+    decision moment has passed). Rest is integer Eastern days from each team's latest
+    scheduled game this season; a team with none skips the game.
+    """
+    decision_week, missing = decision_guard(sheet_df, schedule_df, now_utc)
+    counts = {
+        "decision_week": decision_week,
+        "missing_results": missing,
+        "existing_pick": 0,
+        "past": 0,
+        "not_decidable": 0,
+        "stale_line": 0,
+        "no_previous_game": 0,
+    }
+    if missing:
+        return [], counts
+
+    status = (
+        sheet_df.get("status", pd.Series("", index=sheet_df.index))
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+    opening_line_exists = sheet_df.get("opening_line", pd.Series(np.nan, index=sheet_df.index)).notna()
+
+    out = []
+    for idx, row in sheet_df[(status == "OPEN_CAPTURED") & opening_line_exists].iterrows():
+        if has_existing_pick(row.get("pick_team")):
+            counts["existing_pick"] += 1
+            continue
+
+        kickoff = parse_kickoff(row.get("kickoff_time"))
+        if pd.isna(kickoff):
+            continue
+        if kickoff <= now_utc:
+            counts["past"] += 1
+            continue
+
+        if not row_is_decidable(row, now_utc, decision_week):
+            counts["not_decidable"] += 1
+            continue
+
+        age = line_age_minutes(row.get("opening_captured_at"), now_utc)
+        if age is None or age > max_line_age_minutes:
+            counts["stale_line"] += 1
+            continue
+
+        home = str(row.get("home_team", "")).strip().upper()
+        away = str(row.get("away_team", "")).strip().upper()
+        home_rest = rest_days(previous_game_day(schedule_df, home, kickoff, season=SEASON), kickoff)
+        away_rest = rest_days(previous_game_day(schedule_df, away, kickoff, season=SEASON), kickoff)
+        if home_rest is None or away_rest is None or home_rest < 0 or away_rest < 0:
+            counts["no_previous_game"] += 1
+            continue
+
+        out.append({
+            "idx": idx,
+            "row": row,
+            "kickoff": kickoff,
+            "week": decision_week,
+            "home": home,
+            "away": away,
+            "home_rest": home_rest,
+            "away_rest": away_rest,
+        })
+
+    return out, counts
+
+
+def picks_recorded_for_week(sheet_df, week):
+    if week is None or "week" not in sheet_df.columns or "pick_team" not in sheet_df.columns:
+        return 0
+    weeks = pd.to_numeric(sheet_df["week"], errors="coerce")
+    has_pick = sheet_df["pick_team"].apply(has_existing_pick)
+    return int(((weeks == int(week)) & has_pick).sum())
+
+
+def apply_weekly_cap(scored, sheet_df, week, max_picks=MAX_PICKS):
+    """MAX_PICKS is a weekly cap: allowed this run = max_picks - picks already on the week."""
+    allowed = max(0, int(max_picks) - picks_recorded_for_week(sheet_df, week))
+    ranked = sorted(scored, key=lambda x: x["edge"], reverse=True)
+    return ranked[:allowed]
+
+
+def build_pick_updates(picks, col, now_utc):
+    made_at = pd.Timestamp(now_utc).isoformat()
+    updates = []
+
+    for p in picks:
+        r = p["idx"] + 2
+
+        note = "flat " + str(FLAT_BET_SIZE) + "u"
+
+        if p["used_fallback"]:
+            note += "; away_odds_fallback=-110"
+
+        note += "; mu=" + str(round(p["mu_home_margin"], 2))
+        note += "; sigma=" + str(round(p["sigma"], 2))
+
+        updates.append({"row": r, "col": col["pick_team"], "value": p["pick_team"]})
+        updates.append({"row": r, "col": col["pick_side"], "value": p["side"]})
+        updates.append({"row": r, "col": col["pick_line"], "value": p["pick_line"]})
+        updates.append({"row": r, "col": col["pick_odds"], "value": p["pick_odds"]})
+        updates.append({"row": r, "col": col["model_probability"], "value": round(p["model_p"], 4)})
+        updates.append({"row": r, "col": col["implied_probability_no_vig"], "value": round(p["fair_p"], 4)})
+        updates.append({"row": r, "col": col["edge"], "value": round(p["edge"], 4)})
+        updates.append({"row": r, "col": col["notes"], "value": note})
+        updates.append({"row": r, "col": col["pick_made_at"], "value": made_at})
+
+    return updates
+
+
 def main():
     print("Generating weekly picks...")
 
@@ -77,46 +208,43 @@ def main():
         print("No completed games with enough rolling stats yet. No picks generated.")
         return
 
-    status = (
-        sheet_df.get("status", pd.Series("", index=sheet_df.index))
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
+    schedule_df = _load_sched([SEASON])
+    candidates, counts = eligible_candidates(sheet_df, schedule_df, now_utc)
 
-    opening_line_exists = (
-        sheet_df.get("opening_line", pd.Series(np.nan, index=sheet_df.index))
-        .notna()
-    )
+    if counts["missing_results"]:
+        print_missing_results(counts["missing_results"])
+        return
 
-    candidates = sheet_df[(status == "OPEN_CAPTURED") & opening_line_exists]
+    decision_week = counts["decision_week"]
+    print("Decision week: " + str(decision_week))
 
-    if candidates.empty:
-        print("No OPEN_CAPTURED games with opening lines found.")
+    if counts["stale_line"]:
+        print(
+            "Skipped " + str(counts["stale_line"]) + " game(s) whose opening line is older than "
+            + str(PICK_MAX_LINE_AGE_MINUTES) + " minutes (decision moment passed)."
+        )
+    if counts["not_decidable"]:
+        print("Skipped " + str(counts["not_decidable"]) + " game(s) outside the decision week.")
+    if counts["no_previous_game"]:
+        print("Skipped " + str(counts["no_previous_game"]) + " game(s) where a team has no previous game this season.")
+
+    if not candidates:
+        print("No decidable OPEN_CAPTURED games with fresh opening lines.")
         return
 
     scored = []
     manual_review = []
-    skipped_past = 0
-    skipped_existing_pick = 0
+    skipped_past = counts["past"]
+    skipped_existing_pick = counts["existing_pick"]
     skipped_missing_snapshot = 0
 
-    for idx, row in candidates.iterrows():
-        if has_existing_pick(row.get("pick_team")):
-            skipped_existing_pick += 1
-            continue
-
-        kickoff = parse_kickoff(row.get("kickoff_time"))
-
-        if pd.isna(kickoff):
-            continue
-
-        if kickoff <= now_utc:
-            skipped_past += 1
-            continue
-
-        home = str(row.get("home_team", "")).strip().upper()
-        away = str(row.get("away_team", "")).strip().upper()
+    for cand in candidates:
+        idx = cand["idx"]
+        row = cand["row"]
+        home = cand["home"]
+        away = cand["away"]
+        home_rest = cand["home_rest"]
+        away_rest = cand["away_rest"]
 
         if home not in snap or away not in snap:
             skipped_missing_snapshot += 1
@@ -142,17 +270,6 @@ def main():
                     used_fallback = False
             except Exception:
                 pass
-
-        local_day = kickoff.tz_convert("America/New_York").normalize()
-        h_last = snap[home]["last_date"]
-        a_last = snap[away]["last_date"]
-        h_last_day = h_last.tz_convert("America/New_York").normalize() if getattr(h_last, "tz", None) else pd.to_datetime(h_last, utc=True).tz_convert("America/New_York").normalize()
-        a_last_day = a_last.tz_convert("America/New_York").normalize() if getattr(a_last, "tz", None) else pd.to_datetime(a_last, utc=True).tz_convert("America/New_York").normalize()
-        home_rest = int((local_day - h_last_day).days)
-        away_rest = int((local_day - a_last_day).days)
-
-        if home_rest < 0 or away_rest < 0:
-            continue
 
         division = 1 if DIVISION_MAP.get(home) == DIVISION_MAP.get(away) else 0
 
@@ -245,7 +362,9 @@ def main():
     scored.sort(key=lambda x: x["edge"], reverse=True)
     manual_review.sort(key=lambda x: x["edge"], reverse=True)
 
-    picks = scored[:MAX_PICKS]
+    already = picks_recorded_for_week(sheet_df, decision_week)
+    picks = apply_weekly_cap(scored, sheet_df, decision_week, MAX_PICKS)
+    print("Week " + str(decision_week) + ": " + str(already) + " pick(s) already recorded, weekly cap " + str(MAX_PICKS) + ".")
 
     if skipped_past:
         print("Skipped " + str(skipped_past) + " past game(s).")
@@ -295,29 +414,10 @@ def main():
     headers = ws.row_values(1)
     col = {h: i + 1 for i, h in enumerate(headers)}
 
-    updates = []
+    if "pick_made_at" not in col:
+        raise SystemExit("Master_Bets has no pick_made_at column. Run python -m src.ensure_away_odds_columns first.")
 
-    for p in picks:
-        r = p["idx"] + 2
-
-        note = "flat " + str(FLAT_BET_SIZE) + "u"
-
-        if p["used_fallback"]:
-            note += "; away_odds_fallback=-110"
-
-        note += "; mu=" + str(round(p["mu_home_margin"], 2))
-        note += "; sigma=" + str(round(p["sigma"], 2))
-
-        updates.append({"row": r, "col": col["pick_team"], "value": p["pick_team"]})
-        updates.append({"row": r, "col": col["pick_side"], "value": p["side"]})
-        updates.append({"row": r, "col": col["pick_line"], "value": p["pick_line"]})
-        updates.append({"row": r, "col": col["pick_odds"], "value": p["pick_odds"]})
-        updates.append({"row": r, "col": col["model_probability"], "value": round(p["model_p"], 4)})
-        updates.append({"row": r, "col": col["implied_probability_no_vig"], "value": round(p["fair_p"], 4)})
-        updates.append({"row": r, "col": col["edge"], "value": round(p["edge"], 4)})
-        updates.append({"row": r, "col": col["notes"], "value": note})
-
-    batch_update_cells(ws, updates)
+    batch_update_cells(ws, build_pick_updates(picks, col, now_utc))
 
     print("Auto-recommended " + str(len(picks)) + " picks:")
 

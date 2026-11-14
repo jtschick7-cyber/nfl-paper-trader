@@ -9,8 +9,10 @@ import pytz
 from scipy.stats import norm
 
 from src.config import MAX_AUTO_EDGE, MIN_EDGE_THRESHOLD, SEASON
+from src.decision_window import decision_guard, previous_game_day, print_missing_results, rest_days, row_is_decidable
 from src.injury_guard import audit_candidate_pick
 from src.key_numbers import calculate_spread_probabilities
+from src.model_utils import _load_sched
 from src.model_v2_core import (
     HISTORY_SEASONS,
     american_to_implied_prob_scalar,
@@ -178,6 +180,13 @@ def main():
 
     now_utc = datetime.now(pytz.utc)
 
+    season_sched = _load_sched([SEASON])
+    decision_week, missing = decision_guard(sheet_df, season_sched, now_utc)
+    if missing:
+        print_missing_results(missing)
+        return
+    print("Decision week: " + str(decision_week))
+
     print("Loading live feature state from completed games...")
     print("History seasons: 1999-2024 plus current season " + str(SEASON))
     print("Locked/excluded season: 2025")
@@ -227,6 +236,7 @@ def main():
     skipped_bad_team = 0
     skipped_bad_odds = 0
     skipped_missing_features = 0
+    skipped_not_decidable = 0
     evaluated = 0
 
     for idx, row in sheet_df.iterrows():
@@ -248,6 +258,10 @@ def main():
 
         if kickoff <= now_utc:
             skipped_past += 1
+            continue
+
+        if not row_is_decidable(row, now_utc, decision_week):
+            skipped_not_decidable += 1
             continue
 
         game_id = str(row.get("game_id", "")).strip()
@@ -289,6 +303,14 @@ def main():
             away,
             kickoff,
         )
+
+        # Rest from each team's latest SCHEDULED game (played or not), not its last
+        # completed one. v2 convention: raw day difference, no cap. Week 1 has no
+        # same-season previous game; keep the history-based value there.
+        home_prev = rest_days(previous_game_day(season_sched, home, kickoff, season=SEASON), kickoff)
+        away_prev = rest_days(previous_game_day(season_sched, away, kickoff, season=SEASON), kickoff)
+        if home_prev is not None and away_prev is not None:
+            feats["diff_rest"] = float(home_prev - away_prev)
 
         missing_feats = [c for c in feature_columns if pd.isna(feats.get(c))]
 
@@ -439,6 +461,7 @@ def main():
     print("Skipped bad team: " + str(skipped_bad_team))
     print("Skipped bad odds: " + str(skipped_bad_odds))
     print("Skipped missing features: " + str(skipped_missing_features))
+    print("Skipped outside decision week: " + str(skipped_not_decidable))
     print("")
 
     if not new_rows:

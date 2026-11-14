@@ -2,7 +2,17 @@ from src.sheet_utils import ensure_columns, get_master_sheet
 
 # Master_Bets columns added after the original schema; created here (a sheet-writer job)
 # so the long-lived closing loop only ever writes to headers that already exist.
-EXTRA_COLUMNS = ["opening_away_odds", "closing_away_odds", "total_line", "closing_consensus_line"]
+EXTRA_COLUMNS = [
+    "opening_away_odds",
+    "closing_away_odds",
+    "total_line",
+    "closing_consensus_line",
+    # R1 decision timing
+    "opening_book",
+    "opening_quote_at",
+    "pick_made_at",
+    "decision_regime",
+]
 
 
 def main():
