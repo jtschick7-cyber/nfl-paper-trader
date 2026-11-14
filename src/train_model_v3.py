@@ -16,7 +16,7 @@ Target:
 
 Probability Engine:
 - Discrete Key-Number Margin Distribution (weights 3, 7, 6, 10, etc.)
-- Logistic Platt Calibration
+- Price-consistent market anchor (R5): mu = m* + beta * d, identity calibrator
 """
 
 import json
@@ -31,8 +31,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
-from src.market_blend import blend_margin, fit_market_beta
-from src.key_numbers import calculate_spread_probabilities
+from src.price_anchor import PRODUCTION_VARIANT, artifact_fields, attach_market_prices, fit_price_anchor
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
 
@@ -224,7 +223,7 @@ def train_v3_model(train_seasons=None):
     sched_df = _load_sched(list(range(min(train_seasons) - 2, max(train_seasons) + 1)))
 
     print(f"Building v3 training dataset for seasons {train_seasons}...")
-    dataset = build_v3_training_dataset(train_seasons, epa_df, sched_df)
+    dataset = attach_market_prices(build_v3_training_dataset(train_seasons, epa_df, sched_df), sched_df)
     print(f"Dataset compiled: {len(dataset)} completed games.")
 
     X = dataset[V3_FEATURES].values
@@ -254,11 +253,10 @@ def train_v3_model(train_seasons=None):
         print(f"  {feat:20s}: {coef:+.3f} pts")
     print(f"  {'intercept':20s}: {ridge.intercept_:+.3f} pts")
 
-    # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator
-    # Uses chronological TimeSeriesSplit with symmetric HOME/AWAY rows (weight=0.5)
-    # and monotonicity guard coef > 0
-    # Market blend: walk-forward OOS margins fit beta, the share of model-vs-market
-    # disagreement that predicts ATS results; probabilities use the blended margin.
+    # R5 price-consistent anchor. Walk-forward (TimeSeriesSplit) OOS margins fit beta on
+    # the disagreement against m*, the mean that reproduces the de-vigged price at the
+    # line (src/price_anchor.py). No logistic calibrator: beta is the shrinkage, and
+    # fit_calibrator is kept only as a diagnostic (slope and SE in the artifact).
     from sklearn.model_selection import TimeSeriesSplit
     tscv = TimeSeriesSplit(n_splits=5)
 
@@ -272,36 +270,15 @@ def train_v3_model(train_seasons=None):
 
     oos_df = dataset.iloc[oos_idx].copy()
     oos_df["oos_mu"] = oos_mu
-    beta, beta_se, n_beta = fit_market_beta(oos_df["oos_mu"], oos_df["home_line"], oos_df["actual_home_margin"])
-    oos_df["blend_mu"] = [blend_margin(m, hl, beta) for m, hl in zip(oos_df["oos_mu"], oos_df["home_line"])]
-    blend_sigma = float(np.std(oos_df["actual_home_margin"] - oos_df["blend_mu"]))
-    blend_info = {"market_beta": beta, "market_beta_se": beta_se, "blend_rows": n_beta, "blend_sigma": blend_sigma}
-    print(f"\nMarket blend: beta={beta:.3f} (se {beta_se:.3f}, n={n_beta}), blended sigma={blend_sigma:.2f}")
-
-    evidence_rows = []
-    for _, row in oos_df.iterrows():
-        home_line = float(row["home_line"])
-        diff = float(row["actual_home_margin"]) + home_line
-        push = abs(diff) < 1e-5
-
-        sp = calculate_spread_probabilities(row["blend_mu"], blend_sigma, home_line)
-        p_h = float(sp["cond_home_win"])
-
-        for side, p_raw, win in [("HOME", p_h, diff > 0), ("AWAY", 1.0 - p_h, diff < 0)]:
-            evidence_rows.append({
-                "season": int(row["season"]),
-                "game_id": row["game_id"],
-                "side": side,
-                "p_raw": p_raw,
-                "actual_win": bool(win),
-                "push": bool(push),
-                "weight": 0.5,
-            })
-
-    evidence_df = pd.DataFrame(evidence_rows)
-    calibrator = fit_calibrator(evidence_df)
+    fit = fit_price_anchor(oos_df, variant=PRODUCTION_VARIANT, use_total=False)
+    blend_info = artifact_fields(fit)
+    blend_sigma = fit["sigma"]
+    print(f"\nPrice anchor ({PRODUCTION_VARIANT}): beta={fit['beta']:.4f} (se {fit['beta_se']:.4f}, n={fit['n_beta']}), "
+          f"sigma={blend_sigma:.4f}, prices assumed on {fit['n_price_assumed']} rows")
+    print(f"Diagnostic calibrator: {fit['calibrator_diagnostic']} "
+          f"(slope se {fit['calibrator_diagnostic_se']:.3f})")
+    calibrator = fit["calibrator"]
     calibrator_method, calibrator_params = calibrator
-    print(f"\nCalibrator: method={calibrator_method}, params={calibrator_params}")
 
     # Save artifact
     os.makedirs("models", exist_ok=True)

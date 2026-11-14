@@ -33,6 +33,7 @@ from sklearn.preprocessing import StandardScaler
 from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.market_blend import blend_margin, fit_market_beta
+from src.price_anchor import PRODUCTION_VARIANT, artifact_fields, attach_market_prices, fit_price_anchor
 from src.key_numbers import calculate_spread_probabilities, calculate_totals_conditioned_sigma
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
@@ -327,7 +328,30 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
     return pd.DataFrame(rows)
 
 
+def collect_v4_oos_margins(dataset, features, alpha=15.0):
+    """Walk-forward (TimeSeriesSplit) out-of-sample model margins, as a copy of the
+    validation rows with an `oos_mu` column (input to src.price_anchor.fit_price_anchor)."""
+    from sklearn.model_selection import TimeSeriesSplit
+    tscv = TimeSeriesSplit(n_splits=5)
+    X_all = dataset[features].values
+    y_all = dataset["actual_home_margin"].values
+    oos_idx, oos_mu = [], []
+    for train_idx, val_idx in tscv.split(dataset):
+        scaler_f = StandardScaler().fit(X_all[train_idx])
+        ridge_f = fit_constrained_ridge(scaler_f.transform(X_all[train_idx]), y_all[train_idx], alpha=alpha)
+        oos_idx.extend(val_idx)
+        oos_mu.extend(ridge_f.predict(scaler_f.transform(X_all[val_idx])))
+    oos_df = dataset.iloc[oos_idx].copy()
+    oos_df["oos_mu"] = oos_mu
+    return oos_df
+
+
 def collect_v4_calibration_evidence(dataset, features, alpha=15.0):
+    """Pre-R5 (line anchor + logistic calibrator); kept for reference, not used by training."""
+    return _collect_v4_calibration_evidence_line(dataset, features, alpha)
+
+
+def _collect_v4_calibration_evidence_line(dataset, features, alpha=15.0):
     """
     Walk-forward (TimeSeriesSplit) out-of-sample evidence for the market blend and calibrator.
     1. Collects OOS model margins and fits beta: how far to move off the market line.
@@ -404,7 +428,8 @@ def train_v4_model(train_seasons=None):
     sched_df = _load_sched(all_sched_seasons)
 
     print("Compiling Model v4 training dataset...")
-    dataset = build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df, turnover_df)
+    dataset = attach_market_prices(
+        build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df, turnover_df), sched_df)
     print(f"Dataset compiled: {len(dataset)} completed games.\n")
 
     X = dataset[V4_FEATURES].values
@@ -434,16 +459,20 @@ def train_v4_model(train_seasons=None):
         print(f"  {feat:25s}: {coef:+.3f} pts")
     print(f"  {'intercept':25s}: {ridge.intercept_:+.3f} pts")
 
-    # Fit Out-of-Sample Walk-Forward Log-Odds Calibrator
-    evidence_df, blend_info = collect_v4_calibration_evidence(dataset, V4_FEATURES, alpha=15.0)
+    # R5 price-consistent anchor on walk-forward OOS margins (src/price_anchor.py): beta
+    # is the shrinkage toward m*, sigma is total-conditioned as before, and the logistic
+    # calibrator is fitted only as a diagnostic.
+    oos_df = collect_v4_oos_margins(dataset, V4_FEATURES, alpha=15.0)
+    fit = fit_price_anchor(oos_df, variant=PRODUCTION_VARIANT, use_total=True)
+    blend_info = artifact_fields(fit)
     print(
-        f"\nMarket blend: beta={blend_info['market_beta']:.3f} "
-        f"(se {blend_info['market_beta_se']:.3f}, n={blend_info['blend_rows']}), "
-        f"blended sigma={blend_info['blend_sigma']:.2f}"
+        f"\nPrice anchor ({PRODUCTION_VARIANT}): beta={fit['beta']:.4f} "
+        f"(se {fit['beta_se']:.4f}, n={fit['n_beta']}), sigma={fit['sigma']:.4f}, "
+        f"prices assumed on {fit['n_price_assumed']} rows"
     )
-    calibrator = fit_calibrator(evidence_df)
+    print(f"Diagnostic calibrator: {fit['calibrator_diagnostic']} (slope se {fit['calibrator_diagnostic_se']:.3f})")
+    calibrator = fit["calibrator"]
     calibrator_method, calibrator_params = calibrator
-    print(f"\nCalibrator: method={calibrator_method}, params={calibrator_params}")
 
     # Save artifact
     os.makedirs("models", exist_ok=True)

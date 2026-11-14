@@ -12,20 +12,24 @@ One model places paper bets; the others are logged in shadow tabs and graded on 
 | :--- | :--- | :--- | :--- |
 | **v1 (live)** | Rolling points scored/allowed, margin, rest | Ridge margin → key-number cover probability (uncalibrated) | `Master_Bets` |
 | **v2 (shadow)** | Elo ratings, rest differential, divisional flag | Ridge margin → key-number cover probability → logistic calibration | `V2_Shadow` |
-| **v3 (shadow)** | v2 + `nflverse` pass/rush EPA, success rate, early-down EPA | Constrained ridge → **market blend** → key numbers → calibration | `V3_Shadow` |
-| **v4 (shadow)** | v3 + point-in-time QB starter shocks and turnover-luck regression | Constrained ridge → **market blend** → key numbers → calibration | `V4_Shadow` |
+| **v3 (shadow)** | v2 + `nflverse` pass/rush EPA, success rate, early-down EPA | Constrained ridge → **price-consistent market anchor** → key numbers | `V3_Shadow` |
+| **v4 (shadow)** | v3 + point-in-time QB starter shocks and turnover-luck regression | Constrained ridge → **price-consistent market anchor** → key numbers (totals-conditioned σ) | `V4_Shadow` |
 
 v3 and v4 are trained on 2012–2025 (`src/train_model_v3.py`, `src/train_model_v4.py`).
 
-### Market blend (`src/market_blend.py`)
-The closing spread predicts margins better than any of the box-score models, so v3/v4 treat the market as the prior and move off it only as far as the model's disagreement has predicted ATS results out of sample:
+### Price-consistent market anchor for v3/v4 (`src/price_anchor.py`, R5)
+The closing spread predicts margins better than any of the box-score models, so v3/v4 treat the market as the prior and move off it only as far as the model's disagreement has predicted ATS results out of sample. The prior is the line **and its price**:
 
-`mu_blend = market_mu + beta * (model_mu - market_mu)`, with `market_mu = -home_line`.
+`mu = m* + beta * (model_mu - m*)`, where `m*` is the mean margin at which the key-number engine's no-push home cover probability at the offered line equals the de-vigged market probability of the two prices.
 
-`beta` is fit on walk-forward predictions and clipped to [0, 1]. The current artifacts have beta ≈ 0.04 (v3 0.037, v4 0.042, standard error ≈ 0.07), so v3 and v4 stay within a fraction of a point of the line and PASS on almost every game. That is the expected, honest outcome: the models are not yet showing an edge the market misses. Under the current design v3 and v4 **cannot reach a 2% edge at standard prices** (−110 both sides): a blend this close to the line cannot move the cover probability to the 54.4% that −110 needs for a 2% edge. A pick can still appear on a plus price, with no model input behind it (see `scripts/review_repro/anchor_and_price_checks.py`).
+With no model disagreement the model's probability is therefore the market's, and the edge against break-even is about minus half the vig at any line and price: a plus price alone can no longer make a pick. There is no logistic calibrator for v3/v4 (`calibrator = ("identity", None)`); `beta` is the shrinkage. `fit_calibrator` still runs on the walk-forward data as a diagnostic, and its slope and standard error are stored in the artifact (`calibrator_diagnostic_slope`, `calibrator_diagnostic_se`).
+
+`beta` is the no-intercept OLS slope of `margin - m*` on `model_mu - m*` over walk-forward predictions, clipped to [0, 1]; sigma is the standard deviation of `margin - mu` on the same rows (m* depends on sigma, so the two are iterated). The alternative, disagreement measured against the line (variant B), fitted the 2014–2025 walk-forward backtest no better, so the artifacts use variant A (`anchor_variant`). The current artifacts have beta ≈ 0.02 (v3 0.021, standard error 0.070): v3 needs about 67 points of disagreement on a dead number at −110 before it clears 2%, and it passes on almost every game. That is the honest outcome: the models are not yet showing an edge the market misses.
+
+Artifacts without an `anchor` field (v2, and v3/v4 before R5) use the old line anchor (`mu = -home_line + beta * (model_mu + home_line)` in `src/market_blend.py`) followed by their logistic calibrator; `src/decision.py` keeps that path unchanged for their rows.
 
 ### `no_edge` calibrator (`src/model_v2_core.py`)
-The logistic calibrator is fit on out-of-sample cover outcomes. If its slope comes out zero or negative (raw probabilities carry no or inverted information), the model is flagged `no_edge` instead of being given a forced positive slope; every probability is then 0.5 and the model makes no picks.
+v2's logistic calibrator is fit on out-of-sample cover outcomes. If its slope comes out zero or negative (raw probabilities carry no or inverted information), the model is flagged `no_edge` instead of being given a forced positive slope; every probability is then 0.5 and the model makes no picks. v3/v4 no longer apply a calibrator (see above); for them the same fit is only a stored diagnostic.
 
 ### Edge and staking
 Edge is the calibrated cover probability minus the break-even probability of the price actually taken (vig included), so a positive edge means positive expected value. `Master_Bets.edge` is on that break-even scale only for rows written from 2026-11-02; older rows were written against the no-vig probability and are not recomputed. Picks need `MIN_EDGE_THRESHOLD` (2%); edges above `MAX_AUTO_EDGE` (10%) are sent to manual review rather than auto-bet. Key-number push weights (3, 7, 6, 10, …) are in `src/key_numbers.py`.
@@ -134,15 +138,15 @@ Useful commands:
 
 ```bash
 python -m src.build_features          # refresh EPA feature caches
-python -m src.train_model_v4          # retrain v4 (constrained ridge + market blend + calibrator)
-python -m src.backtest_production     # walk-forward backtest of the live shadow rule (v3; --model v4)
+python -m src.train_model_v4          # retrain v4 (constrained ridge + price-consistent anchor)
+python -m src.backtest_production     # walk-forward backtest of the live shadow rule (v3; --model v4; --anchor line|price|all)
 python -m src.backtest_epa --test-seasons 2024 2025   # older backtest; does not model the live rule
 python -m src.compare_models          # rebuild the scorecard
 ```
 
 Backtests are walk-forward with no lookahead. Small high-edge subsets from past backtests were too small to mean anything and are no longer quoted here.
 
-`src/backtest_production.py` (R4) tests the rule the shadow loggers actually run. Both share `src/decision.py` (blend by β, key-number probabilities, calibrator, break-even edge). Each test season (2014–2025) gets its own ridge, β and calibrator fitted on earlier seasons only, and every game is also re-run with zero model disagreement, so a pick that comes from the price or line number alone shows up. It uses nflverse closing lines and prices, so it tests the rule against the close, not the in-week opener. Its report and `data/backtest_production_*.csv` are the baseline any model or rule change (R5 first) must beat. `src/backtest_epa.py` and `src/backtest_model.py` do not model the market blend or the break-even edge, so they do not test the production rule.
+`src/backtest_production.py` (R4) tests the rule the shadow loggers actually run. Both share `src/decision.py` (anchor and β, key-number probabilities, calibrator where the artifact has one, break-even edge). Each test season (2014–2025) gets its own ridge, β, σ and calibrator fitted on earlier seasons only, and every game is also re-run with zero model disagreement, so a pick that comes from the price or line number alone shows up. It uses nflverse closing lines and prices, so it tests the rule against the close, not the in-week opener. Its report and `data/backtest_production_<model>_<anchor>_*.csv` are the baseline any model or rule change must beat. `--anchor line` reruns the pre-R5 rule, `--anchor price --variant A|B` the price-consistent anchor (the default is the live rule), `--anchor all` all three. `src/backtest_epa.py` and `src/backtest_model.py` do not model the market blend or the break-even edge, so they do not test the production rule.
 
 Judge a model change on both: the production backtest first, then the live scorecard's CLV, which needs far fewer bets than win rate to separate skill from noise.
 

@@ -124,3 +124,18 @@ def test_logger_headers_append_raw_lean_columns_last(mod, live):
     assert mod.HEADERS[-3:] == ["raw_mu_home_margin", "raw_lean_pts", "raw_lean_side"]
     assert mod.HEADERS[:-3] == live + ["artifact_id", "decision_regime"]
     assert len(set(mod.HEADERS)) == len(mod.HEADERS)
+
+
+def test_backfill_never_unblends_a_price_anchored_artifact(monkeypatch):
+    # R5: the line-anchor unblend formula is wrong for a price-anchored artifact's mu;
+    # those rows log their raw lean themselves, so the backfill leaves them alone.
+    import joblib
+    fake = {
+        "models/nfl_spread_model_v2.pkl": {"trained_seasons": [2012, 2025]},
+        "models/nfl_spread_model_v3.pkl": {"market_beta": 0.05, "anchor": "price", "trained_seasons": [2012, 2025]},
+        "models/nfl_spread_model_v4.pkl": {"market_beta": 0.04, "trained_seasons": [2012, 2025]},
+    }
+    monkeypatch.setattr(joblib, "load", lambda path: fake[path])
+    betas = bf.current_betas()
+    assert list(betas.values()) == [0.04]
+    assert all(aid.startswith("v4_") for aid in betas)

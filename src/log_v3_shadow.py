@@ -415,6 +415,7 @@ def main():
         dec = game_decision.shadow_decision(
             mu, home_line, home_odds, away_odds,
             sigma=sigma, market_beta=market_beta, calibrator=calibrator,
+            anchor=artifact.get("anchor"), anchor_variant=artifact.get("anchor_variant"),
         )
         mu = dec["mu_blend"]
         p_home_discrete = dec["p_home_discrete"]

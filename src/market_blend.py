@@ -21,17 +21,30 @@ def market_mu(home_line):
     return -float(home_line)
 
 
-def fit_market_beta(oos_model_mu, home_lines, actual_margins):
+def fit_market_beta(oos_model_mu, home_lines, actual_margins, anchor=None, variant="A"):
     """
     Fits beta on out-of-sample predictions. Returns (beta, beta_se, n).
+
+    anchor None: the line anchor above. With an explicit anchor array (R5, the
+    price-consistent mean m*), the residual is margin - anchor and the disagreement is
+    model_mu - anchor (variant "A") or model_mu - (-home_line) (variant "B").
     """
     mu = np.asarray(oos_model_mu, dtype=float)
     mkt = -np.asarray(home_lines, dtype=float)
     y = np.asarray(actual_margins, dtype=float)
 
-    ok = np.isfinite(mu) & np.isfinite(mkt) & np.isfinite(y)
-    d = (mu - mkt)[ok]
-    r = (y - mkt)[ok]
+    if anchor is None:
+        base = mkt
+        ref = mkt
+    else:
+        if variant not in ("A", "B"):
+            raise ValueError(f"unknown anchor variant {variant!r}")
+        base = np.asarray(anchor, dtype=float)
+        ref = base if variant == "A" else mkt
+
+    ok = np.isfinite(mu) & np.isfinite(mkt) & np.isfinite(base) & np.isfinite(y)
+    d = (mu - ref)[ok]
+    r = (y - base)[ok]
     n = int(ok.sum())
 
     sxx = float(np.sum(d * d))
@@ -49,3 +62,13 @@ def blend_margin(model_mu, home_line, beta):
     """Shrinks the model margin toward the market margin by beta."""
     m = market_mu(home_line)
     return m + float(beta) * (float(model_mu) - m)
+
+
+def blend_margin_anchored(model_mu, m_star, beta, line_mu=None):
+    """
+    R5 price-consistent blend: mu = m* + beta * d. d is model_mu - m* (variant A, line_mu
+    None) or model_mu - line_mu (variant B, line_mu = -home_line).
+    """
+    m_star = float(m_star)
+    ref = m_star if line_mu is None else float(line_mu)
+    return m_star + float(beta) * (float(model_mu) - ref)

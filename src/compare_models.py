@@ -500,6 +500,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
         master_df = filter_regime(master_df, regime, regimes, kind="v1")
     if v2_df is not None and not v2_df.empty and "game_id" in v2_df.columns:
         v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="first")
+    v3_regime_df, v4_regime_df = v3_df, v4_df
     v3_df = first_priced_decision(v3_df, "v3_best_line")
     v4_df = first_priced_decision(v4_df, "v4_best_line")
 
@@ -682,6 +683,9 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
         summary_rows.append(compute_metrics(v4_bets, "Model v4 (EPA+QB+Luck+Totals)", "All Picks"))
         summary_rows.append(compute_metrics(v4_high_bets, "Model v4 High-Conviction (>=3.5%)", "High-Conviction"))
 
+    if regime == IN_WEEK:
+        summary_rows = _with_artifact_lines(summary_rows, full_master_df, v3_regime_df, v4_regime_df, scores)
+
     # Guard audit (what would have happened to suppressed danger bets?)
     guard_metrics = compute_metrics(suppressed_bets, "Guard Suppressed Danger Bets", "Hypothetical Placed")
 
@@ -696,6 +700,42 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
     }
 
     return summary_rows, guard_metrics, counts_dict
+
+
+NO_ARTIFACT_LABEL = "(no artifact_id)"
+
+
+def _artifact_groups(df):
+    """[(artifact_id, rows)] in first-seen order; blank ids share NO_ARTIFACT_LABEL."""
+    if df is None or df.empty:
+        return []
+    ids = df["artifact_id"] if "artifact_id" in df.columns else pd.Series([""] * len(df), index=df.index)
+    ids = ids.fillna("").astype(str).str.strip().replace({"": NO_ARTIFACT_LABEL, "nan": NO_ARTIFACT_LABEL})
+    return [(aid, df[ids == aid]) for aid in dict.fromkeys(ids)]
+
+
+def _with_artifact_lines(summary_rows, master_df, v3_df, v4_df, scores):
+    """
+    R5: when a shadow tab's in-week rows come from more than one artifact (a retrain),
+    each artifact also gets its own line, graded on its own first rows per game, right
+    after that model's lines. The merged line is kept as it was.
+    """
+    out = list(summary_rows)
+    for prefix, df in (("Model v3", v3_df), ("Model v4", v4_df)):
+        groups = _artifact_groups(df)
+        if len(groups) < 2:
+            continue
+        lines = []
+        for aid, rows in groups:
+            if prefix == "Model v3":
+                sub = evaluate_all_models(master_df, None, rows, scores)[0]
+            else:
+                sub = evaluate_all_models(master_df, None, None, scores, v4_df=rows)[0]
+            base = next(r for r in sub if r["model"].startswith(prefix + " (") and r["tier"] == "All Picks")
+            lines.append(dict(base, model=f"{prefix} [{aid}]"))
+        last = max(i for i, r in enumerate(out) if r["model"].startswith(prefix))
+        out[last + 1:last + 1] = lines
+    return out
 
 
 def evaluate_regimes(master_df, v2_df, v3_df, scores, v4_df=None):

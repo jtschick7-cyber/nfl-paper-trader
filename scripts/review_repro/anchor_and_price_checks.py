@@ -17,19 +17,23 @@ from src.market_blend import blend_margin
 arts = {v: joblib.load(f"models/nfl_spread_model{'' if v=='v1' else '_'+v}.pkl") for v in ["v2","v3","v4"]}
 print("== 1. calibrators stored in the .pkl artifacts")
 for v,a in arts.items():
-    print(v, a.get("calibrator_method"), a.get("calibrator_params"), "beta", a.get("market_beta"), "sigma", round(a["sigma"],3))
+    print(v, a.get("calibrator_method"), a.get("calibrator_params"), "beta", a.get("market_beta"), "sigma", round(a["sigma"],3),
+          "anchor", a.get("anchor", "line"), a.get("anchor_variant", ""))
 
 print("\n== 2. zero-disagreement repro (raw model margin == market margin) -> decision driven by line/price only")
+print("   Runs src.decision.shadow_decision, the rule the loggers run, with each artifact's own fields.")
+print("   Price-anchored artifacts (R5): zero disagreement is raw_mu = m* (variant A) or -home_line (B).")
+from src.decision import shadow_decision
 def decide(v, home_line, ho, ao, raw_dis=0.0):
-    a = arts[v]; cal=(a["calibrator_method"], a["calibrator_params"])
-    mkt = -home_line
-    mu_raw = mkt + raw_dis
-    mu = blend_margin(mu_raw, home_line, a["market_beta"]) if a.get("market_beta") is not None else mu_raw
-    r = calculate_spread_probabilities(mu, a["sigma"], home_line)
-    ph = calibrate_probability(cal, r["cond_home_win"]); pa = 1-ph
-    eh = ph - american_to_implied_prob(ho); ea = pa - american_to_implied_prob(ao)
-    side, e = ("HOME",eh) if eh>=ea else ("AWAY",ea)
-    return r["cond_home_win"], ph, side, e
+    a = arts[v]
+    kw = dict(sigma=a["sigma"], market_beta=a.get("market_beta"),
+              calibrator=a.get("calibrator", (a["calibrator_method"], a["calibrator_params"])),
+              anchor=a.get("anchor"), anchor_variant=a.get("anchor_variant"))
+    zero = -home_line
+    if a.get("anchor") == "price" and a.get("anchor_variant", "A") == "A":
+        zero = shadow_decision(zero, home_line, ho, ao, **kw)["anchor_mean"]
+    d = shadow_decision(zero + raw_dis, home_line, ho, ao, **kw)
+    return d["p_home_discrete"], d["p_home_cal"], d["best_side"], d["best_edge"]
 rows=[]
 for v in ["v2","v3","v4"]:
     for hl,ho,ao in [(-3,-110,-110),(-3,110,-130),(3,-130,110),(-7.5,-110,-110),(7.5,-110,-110),(-2.5,-110,-110),(3.5,-110,-110),(-3,105,-125),(1.5,112,-135)]:
