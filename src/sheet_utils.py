@@ -383,3 +383,42 @@ def verify_row_game_ids(ws, expected, gid_col: int):
         row for row, gid in expected.items()
         if row - 1 < len(gid_values) and str(gid_values[row - 1]).strip() == str(gid).strip()
     }
+
+
+def ensure_tab_headers(ws, headers) -> None:
+    """
+    Makes row 1 of a tab equal `headers` without ever rewriting an existing header cell.
+
+    - Empty sheet: writes `headers`.
+    - Existing row is a prefix of `headers` (same names, same order): grows the grid if
+      needed and writes only the missing cells, so columns are appended, never moved.
+    - Anything else raises ValueError with both rows; fix the tab by hand.
+    """
+    headers = [str(h) for h in headers]
+    try:
+        first = list(ws.row_values(1))
+    except Exception:
+        first = []
+    while first and str(first[-1]).strip() == "":
+        first.pop()
+    first = [str(h) for h in first]
+
+    if not first:
+        if ws.col_count < len(headers):
+            ws.add_cols(len(headers) - ws.col_count)
+        ws.update([headers], "A1")
+        return
+
+    if len(first) > len(headers) or first != headers[: len(first)]:
+        raise ValueError(
+            "Header row does not match the expected headers and will not be rewritten.\n"
+            + "Found:    " + repr(first) + "\n"
+            + "Expected: " + repr(headers)
+        )
+
+    missing = headers[len(first):]
+    if not missing:
+        return
+    if ws.col_count < len(headers):
+        ws.add_cols(len(headers) - ws.col_count)
+    ws.update([missing], col_to_letter(len(first) + 1) + "1")

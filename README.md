@@ -22,13 +22,13 @@ The closing spread predicts margins better than any of the box-score models, so 
 
 `mu_blend = market_mu + beta * (model_mu - market_mu)`, with `market_mu = -home_line`.
 
-`beta` is fit on walk-forward predictions and clipped to [0, 1]. The current artifacts have beta ≈ 0.04 (v3 0.037, v4 0.042, standard error ≈ 0.07), so v3 and v4 stay within a fraction of a point of the line and PASS on almost every game. That is the expected, honest outcome: the models are not yet showing an edge the market misses.
+`beta` is fit on walk-forward predictions and clipped to [0, 1]. The current artifacts have beta ≈ 0.04 (v3 0.037, v4 0.042, standard error ≈ 0.07), so v3 and v4 stay within a fraction of a point of the line and PASS on almost every game. That is the expected, honest outcome: the models are not yet showing an edge the market misses. Under the current design v3 and v4 **cannot reach a 2% edge at standard prices** (−110 both sides): a blend this close to the line cannot move the cover probability to the 54.4% that −110 needs for a 2% edge. A pick can still appear on a plus price, with no model input behind it (see `scripts/review_repro/anchor_and_price_checks.py`).
 
 ### `no_edge` calibrator (`src/model_v2_core.py`)
 The logistic calibrator is fit on out-of-sample cover outcomes. If its slope comes out zero or negative (raw probabilities carry no or inverted information), the model is flagged `no_edge` instead of being given a forced positive slope; every probability is then 0.5 and the model makes no picks.
 
 ### Edge and staking
-Edge is the calibrated cover probability minus the break-even probability of the price actually taken (vig included), so a positive edge means positive expected value. Picks need `MIN_EDGE_THRESHOLD` (2%); edges above `MAX_AUTO_EDGE` (10%) are sent to manual review rather than auto-bet. Key-number push weights (3, 7, 6, 10, …) are in `src/key_numbers.py`.
+Edge is the calibrated cover probability minus the break-even probability of the price actually taken (vig included), so a positive edge means positive expected value. `Master_Bets.edge` is on that break-even scale only for rows written from 2026-11-02; older rows were written against the no-vig probability and are not recomputed. Picks need `MIN_EDGE_THRESHOLD` (2%); edges above `MAX_AUTO_EDGE` (10%) are sent to manual review rather than auto-bet. Key-number push weights (3, 7, 6, 10, …) are in `src/key_numbers.py`.
 
 v1 bets flat stakes on at most `MAX_PICKS` (5) picks **per week**: each run may add only `MAX_PICKS` minus the picks already recorded for that week, highest edge first.
 
@@ -42,13 +42,19 @@ A game is decided only in the run where it is **decidable**: its week is the sma
 ### Promoting a shadow model to live
 A shadow model (v2, v3 or v4) replaces v1 only if all of these hold at a weekly checkpoint (after the Tuesday scorecard):
 1. **Sample:** at least **40 graded bets with a recorded close**, across at least **6 different weeks**.
-2. **Beats the close:** **Avg CLV Win Prob ≥ +0.5%** over all those bets.
-3. **Holds up week to week:** Avg CLV Win Prob is positive in **at least 60% of the weeks** it bet.
-4. **Beats v1:** its Avg CLV Win Prob is at least **0.5 points higher than v1's** over the same weeks.
+2. **Beats the close:** **Avg CLV Fair Prob ≥ +0.5%** over all those bets.
+3. **Holds up week to week:** Avg CLV Fair Prob is positive in **at least 60% of the weeks** it bet.
+4. **Beats v1:** its Avg CLV Fair Prob is at least **0.5 points higher than v1's** over the same weeks.
 5. **Profit is reported but not required.** At 40 bets it's mostly noise.
-6. **Timing:** if two models qualify, the one with the higher Avg CLV Win Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
+6. **Timing:** if two models qualify, the one with the higher Avg CLV Fair Prob wins. The switch happens at the next Tuesday run, never mid-week, and the date and numbers get recorded here.
 
-Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average change in cover probability between the line taken and the closing line. For condition 3, the scorecard's **Weekly Avg CLV Win Prob** table shows each model's average by week and its positive weeks (`Weeks +`); only weeks with at least one bet that has a recorded close count.
+Only the scorecard's **in-week** block counts: v1 bets with `decision_regime = in_week`, and shadow rows logged from 2026-11-03 00:00 UTC for games decided in-week. Look-ahead v1 picks and older shadow rows are shown in a separate **Legacy (excluded from promotion)** block.
+
+**Avg CLV Fair Prob** (price-aware) is the fair probability of the ticket at the close minus its fair probability when taken. The closing home line and its de-vigged price at the primary book fix the market's mean margin (`market_implied_mean` in `src/key_numbers.py`); the ticket's no-push cover probability under that mean is compared with the de-vigged probability of the price taken. It uses the single-book close (`closing_line`, `closing_odds`, `closing_away_odds`) because the consensus line has no price; a bet without closing prices falls back to the line-only number. The scorecard shows its standard error next to it.
+
+**Avg CLV Win Prob** (line only) is the average change in cover probability between the line taken and the closing line, ignoring price; it is kept for comparison and is not used by any promotion condition. For condition 3, the scorecard's **Weekly Avg CLV Fair Prob** table shows each model's Avg CLV Fair Prob by week and its positive weeks (`Weeks +`); only weeks with at least one bet that has a recorded close count.
+
+**How much 40 bets can tell you.** The per-bet CLV has a standard deviation of about 5.5 points, so the standard error of a 40-bet average is about 0.9 points: 40 bets cannot separate a true +0.5% from zero. Read conditions 2 and 4 together with the SE column; the thresholds themselves are the owner's call and have not been changed.
 
 ---
 
@@ -56,7 +62,9 @@ Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average c
 
 1. **`Master_Bets`**: the live ledger. Opening lines, v1 picks, closing lines, scores, CLV and units.
 2. **`V2_Shadow`**, **`V3_Shadow`**, **`V4_Shadow`**: shadow evaluations for each model.
-3. **`Model_Scorecard`**: side-by-side record, units, ROI, CLV beat/tie rates, average CLV in points and in win probability, plus the active-slate head-to-head matrix. Each model is graded on its **first** logged decision per game.
+3. **`Model_Scorecard`**: side-by-side record, units, ROI, CLV beat/tie/lose shares (each over all bets with a close, so they sum to 100%), average CLV in points, in win probability and price-aware (with its standard error), plus the active-slate head-to-head matrix. An in-week block (the promotion sample) comes first and a legacy block below it. Each model is graded on its **first** logged decision per game within each block. "Guard suppressed" counts only `SUPPRESS_DANGER` rows whose edge cleared `MIN_EDGE_THRESHOLD`; the loggers now record `PASS` below the threshold whatever the guard says.
+
+Shadow tabs end with `artifact_id` (training span plus the first 8 hex characters of the `.pkl` sha256, e.g. `v3_2012-2025_1a2b3c4d`) and `decision_regime`. Loggers add missing header cells with `ensure_tab_headers` (`src/sheet_utils.py`), which appends to an existing header row but never rewrites it and stops if the row is not a prefix of the expected headers.
 
 ### Closing line and CLV columns (`Master_Bets`)
 | Column | Meaning |
@@ -67,6 +75,8 @@ Avg CLV Win Prob is the `Model_Scorecard` column of the same name: the average c
 | `closing_captured_at` | Timestamp of the market update that was captured |
 
 The scorecard's CLV uses `closing_consensus_line` when present (one book's number is noisy) and falls back to `closing_line`. CLV is reported in points and as the change in cover probability using key-number push weights, so moving off 3 counts for more than moving between dead numbers. New columns are created by `src/ensure_away_odds_columns.py` during the Tuesday run.
+
+`Master_Bets.clv_points` is written at close and settle time and is not recomputed; where it differs from the scorecard, the scorecard is authoritative.
 
 ---
 

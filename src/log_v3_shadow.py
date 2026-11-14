@@ -36,14 +36,16 @@ from src.odds_utils import (
     get_cached_live_home_spread,
     remove_vig,
 )
-from src.sheet_utils import get_sheet_as_df
+from src.artifacts import artifact_id as build_artifact_id
+from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.v2_sheet_utils import get_or_create_worksheet
 
 MODEL_PATH = "models/nfl_spread_model_v3.pkl"
 SHADOW_TAB = "V3_Shadow"
 EPA_DATA_PATH = "data/team_game_epa.csv"
-MODEL_VERSION = os.getenv("V3_MODEL_VERSION", "v3_epa_enhanced_2023_2025")
+# Override only; by default rows carry the artifact's own model_version (R2).
+MODEL_VERSION_OVERRIDE = os.getenv("V3_MODEL_VERSION")
 
 HEADERS = [
     "model_version",
@@ -89,7 +91,12 @@ HEADERS = [
     "v1_pick",
     "integrity_flags",
     "notes",
+    # Appended in R2; never reorder.
+    "artifact_id",
+    "decision_regime",
 ]
+
+DECISION_REGIME = "in_week"
 
 
 def clean(value):
@@ -133,18 +140,20 @@ def _dedup_key(game_id, home_line, home_odds):
 
 
 def ensure_headers(ws):
-    try:
-        first = ws.row_values(1)
-    except Exception:
-        first = []
+    ensure_tab_headers(ws, HEADERS)
 
-    if not first:
-        ws.update([HEADERS], "A1")
-        return
 
-    if first[0] != HEADERS[0]:
-        print(f"Updating headers in {SHADOW_TAB}...")
-        ws.update([HEADERS], "A1")
+def shadow_decision(best_edge, recommendation):
+    """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
+    if best_edge < MIN_EDGE_THRESHOLD:
+        return "PASS"
+    if recommendation == "SUPPRESS":
+        return "SUPPRESS_DANGER"
+    if recommendation == "MANUAL_REVIEW":
+        return "MANUAL_REVIEW"
+    if best_edge >= 0.035:
+        return "HIGH_CONVICTION"
+    return "SHADOW_PICK"
 
 
 def ensure_epa_cache_is_current():
@@ -245,6 +254,9 @@ def main():
     ensure_epa_cache_is_current()
 
     artifact = joblib.load(MODEL_PATH)
+    model_version = MODEL_VERSION_OVERRIDE or str(artifact.get("model_version") or "v3")
+    artifact_id = build_artifact_id(MODEL_PATH, artifact, "v3")
+    print(f"Model version: {model_version} | artifact: {artifact_id}")
     market_beta = artifact.get("market_beta")
     feature_columns = artifact["feature_columns"]
     scaler = artifact["scaler"]
@@ -476,17 +488,7 @@ def main():
             max_auto_edge=MAX_AUTO_EDGE,
         )
 
-        # Decision classification
-        if alert.recommendation == "SUPPRESS":
-            decision = "SUPPRESS_DANGER"
-        elif alert.recommendation == "MANUAL_REVIEW":
-            decision = "MANUAL_REVIEW"
-        elif best_edge >= 0.035:
-            decision = "HIGH_CONVICTION"
-        elif best_edge >= MIN_EDGE_THRESHOLD:
-            decision = "SHADOW_PICK"
-        else:
-            decision = "PASS"
+        decision = shadow_decision(best_edge, alert.recommendation)
 
         v1_pick = ""
         if has_pick(row.get("pick_team")):
@@ -512,7 +514,7 @@ def main():
             notes.append(shop_note)
 
         new_rows.append([
-            clean(MODEL_VERSION),
+            clean(model_version),
             clean(now_utc.isoformat()),
             clean(row.get("season", SEASON)),
             clean(row.get("week", "")),
@@ -555,6 +557,8 @@ def main():
             clean(v1_pick),
             clean("; ".join(alert.flags)),
             clean("; ".join(notes)),
+            clean(artifact_id),
+            clean(DECISION_REGIME),
         ])
 
         existing_keys.add(key)

@@ -39,7 +39,8 @@ from src.odds_utils import (
     get_cached_live_home_spread,
     remove_vig,
 )
-from src.sheet_utils import get_sheet_as_df
+from src.artifacts import artifact_id as build_artifact_id
+from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
 from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.train_model_v4 import (
@@ -55,7 +56,8 @@ EPA_DATA_PATH = "data/team_game_epa.csv"
 QB_DATA_PATH = "data/team_game_qb.csv"
 TURNOVER_DATA_PATH = "data/team_game_turnovers.csv"
 LOCAL_CSV_PATH = "data/v4_shadow_picks.csv"
-MODEL_VERSION = os.getenv("V4_MODEL_VERSION", "v4_epa_qb_luck_totals_2023_2025")
+# Override only; by default rows carry the artifact's own model_version (R2).
+MODEL_VERSION_OVERRIDE = os.getenv("V4_MODEL_VERSION")
 
 HEADERS = [
     "model_version",
@@ -107,7 +109,12 @@ HEADERS = [
     "v1_disagreement",
     "guard_recommendation",
     "guard_notes",
+    # Appended in R2; never reorder.
+    "artifact_id",
+    "decision_regime",
 ]
+
+DECISION_REGIME = "in_week"
 
 
 def sheet_safe(value):
@@ -132,17 +139,37 @@ def _dedup_key(game_id, home_line, home_odds):
 
 
 def ensure_headers(ws):
-    if ws.col_count < len(HEADERS):
-        ws.resize(cols=len(HEADERS))
-    try:
-        first = ws.row_values(1)
-    except Exception:
-        first = []
-    if not first:
-        ws.update([HEADERS], "A1")
-        return
-    if first != HEADERS:
-        ws.update([HEADERS], "A1")
+    ensure_tab_headers(ws, HEADERS)
+
+
+def shadow_decision(best_edge, recommendation):
+    """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
+    if best_edge < MIN_EDGE_THRESHOLD:
+        return "PASS"
+    if recommendation == "SUPPRESS":
+        return "SUPPRESS_DANGER"
+    if recommendation == "MANUAL_REVIEW":
+        return "MANUAL_REVIEW"
+    if best_edge >= 0.035:
+        return "HIGH_CONVICTION"
+    if best_edge <= MAX_AUTO_EDGE:
+        return "SHADOW_PICK"
+    return "PASS"
+
+
+def append_local_csv(new_rows, path=None):
+    """Appends rows to the local CSV, rewriting it once if its header predates HEADERS."""
+    path = path or LOCAL_CSV_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new_df = pd.DataFrame(new_rows, columns=HEADERS)
+    if os.path.exists(path):
+        old_df = pd.read_csv(path)
+        if list(old_df.columns) != HEADERS:
+            pd.concat([old_df, new_df], ignore_index=True)[HEADERS].to_csv(path, index=False)
+            return
+        new_df.to_csv(path, mode="a", header=False, index=False)
+    else:
+        new_df.to_csv(path, index=False)
 
 
 def get_point_in_time_context(sched_completed, home_team, away_team, kickoff):
@@ -246,6 +273,9 @@ def run_v4_shadow_evaluations():
         raise SystemExit(f"Missing EPA data at {EPA_DATA_PATH}.")
 
     artifact = joblib.load(MODEL_PATH)
+    model_version = MODEL_VERSION_OVERRIDE or str(artifact.get("model_version") or "v4")
+    artifact_id = build_artifact_id(MODEL_PATH, artifact, "v4")
+    print(f"Model version: {model_version} | artifact: {artifact_id}")
     market_beta = artifact.get("market_beta")
     ridge = artifact.get("ridge") or artifact.get("ridge_model")
     scaler = artifact["scaler"]
@@ -514,16 +544,7 @@ def run_v4_shadow_evaluations():
             max_auto_edge=MAX_AUTO_EDGE,
         )
 
-        if alert.recommendation == "SUPPRESS":
-            decision = "SUPPRESS_DANGER"
-        elif alert.recommendation == "MANUAL_REVIEW":
-            decision = "MANUAL_REVIEW"
-        elif best_edge >= 0.035:
-            decision = "HIGH_CONVICTION"
-        elif MIN_EDGE_THRESHOLD <= best_edge <= MAX_AUTO_EDGE:
-            decision = "SHADOW_PICK"
-        else:
-            decision = "PASS"
+        decision = shadow_decision(best_edge, alert.recommendation)
 
         v1_p_team = str(row.get("pick_team", "")).strip().upper()
         if decision in {"SHADOW_PICK", "HIGH_CONVICTION"}:
@@ -547,7 +568,7 @@ def run_v4_shadow_evaluations():
         week_val = int(row.get("week", 1))
 
         row_data = [
-            MODEL_VERSION,
+            model_version,
             logged_at,
             season_val,
             week_val,
@@ -599,6 +620,8 @@ def run_v4_shadow_evaluations():
                 (list(alert.flags) if alert.flags else [])
                 + ([shop_note] if shop_note else [])
             ) or "NONE",
+            artifact_id,
+            DECISION_REGIME,
         ]
 
         new_rows.append(row_data)
@@ -634,12 +657,7 @@ def run_v4_shadow_evaluations():
         new_rows = [[sheet_safe(v) for v in r] for r in new_rows]
 
         # Save locally to CSV
-        os.makedirs(os.path.dirname(LOCAL_CSV_PATH), exist_ok=True)
-        new_df = pd.DataFrame(new_rows, columns=HEADERS)
-        if os.path.exists(LOCAL_CSV_PATH):
-            new_df.to_csv(LOCAL_CSV_PATH, mode="a", header=False, index=False)
-        else:
-            new_df.to_csv(LOCAL_CSV_PATH, index=False)
+        append_local_csv(new_rows)
         print(f"Saved {len(new_rows)} Model v4 shadow evaluations to '{LOCAL_CSV_PATH}'.")
 
         # Save to Google Sheets if connected

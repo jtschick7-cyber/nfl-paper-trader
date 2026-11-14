@@ -2,23 +2,34 @@
 
 ## Current state
 
-- **Branch:** `claude/r1-decision-timing` (PR open). Merge before Tue 2026-11-17 15:17 UTC so week 12 is the first clean `in_week` week.
-- **Last task:** R1, fix decision timing (2026-11-14).
-- **Next task:** **R2, scorecard hygiene.** Spec: `notes/implementation-plan/R2-scorecard-hygiene.md`. Owner question for R2 is in the plan README table.
-- **After the first live Tuesday run with R1:** check the Sheet: no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
-- **If R1 merges after the deadline:** run the `Migrate look-ahead openers` workflow (dry run first, then tick `apply`).
+- **Branch:** `claude/r2-scorecard-hygiene` (PR open). R1 merged as PR #14.
+- **Last task:** R2, scorecard hygiene (2026-11-14).
+- **Next task:** **R3, raw-lean tracking.** Spec: `notes/implementation-plan/R3-raw-lean-tracking.md`. Owner question for R3 is in the plan README table.
+- **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
+- **After R2 merges and the next scorecard refresh:** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
 
 ## Task queue
 
 | Task | Spec | Status |
 |---|---|---|
-| R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR), live check pending |
-| R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | not started |
+| R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR #14), live check pending |
+| R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR), live check pending |
 | R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | not started |
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | not started (independent of R1–R3) |
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | not started (needs R4, R2) |
 
 ## Log
+
+### 2026-11-14: R2 scorecard hygiene
+
+- `sheet_utils.ensure_tab_headers`: writes an empty header row, appends missing cells to a prefix, raises otherwise. Replaces the three loggers' `ensure_headers` (v3/v4 no longer overwrite row 1). Checked against the 11-13 dump: all three live header rows equal the old `HEADERS`.
+- Shadow tabs append `artifact_id` (`src/artifacts.py`: span + sha256[:8]) and `decision_regime = in_week`. v3/v4 rows carry the artifact's `model_version` (env var still overrides); v2 unchanged. v4's local CSV is rewritten once with the new header.
+- Loggers: `shadow_decision()` returns `PASS` below `MIN_EDGE_THRESHOLD` whatever the guard says. Scorecard counts `SUPPRESS_DANGER` only at or above the threshold.
+- `compare_models`: `SHADOW_LEGACY_CUTOFF_UTC`, `parse_logged_at` (both formats), `evaluate_all_models(regime=...)`, `evaluate_regimes`. In-week block first, then "Legacy (excluded from promotion)"; weekly CLV is in-week only.
+- Price-aware CLV: `clv_fair_probability` + `key_numbers.market_implied_mean` (matches the spec table). Scorecard appends `CLV Lose %`, `Avg CLV Fair Prob`, `Avg CLV Fair Prob SE`; beat/tie/lose are now shares of all bets with a close.
+- README: every promotion condition (2, 3, 4, 6) uses Avg CLV Fair Prob on in-week rows (owner agreed to 3 and 6 on 2026-11-14; weekly table switched too); 40-bet SE note; v3/v4 cannot reach 2% at −110; `edge` scale change on 2026-11-02; `clv_points` not authoritative.
+- Offline run on the 11-13 dump (scores from `game_result`): in-week block empty; legacy v1 18, v2 6, v3 4; guard 3 (TEN@CIN, NYJ@KC, ARI@SEA).
+- `pytest tests/`: 139 passed (34 new). One existing assertion changed on purpose: beat % in `test_ties_reported_separately_from_beat_rate` is now 25 (share of all bets), not 50.
 
 ### 2026-11-14: R1 decision timing
 

@@ -80,7 +80,9 @@ def test_sheet_guard_row_matches_header_width(monkeypatch):
 
     header_idx = next(i for i, r in enumerate(ws.values) if r and r[0] == "Model")
     header = ws.values[header_idx]
-    assert len(header) == 13
+    assert len(header) == len(cm.SCORECARD_HEADER)
+    assert list(header[:13]) == list(cm.SCORECARD_HEADER[:13])  # old columns keep their places
+    assert {"CLV Lose %", "Avg CLV Fair Prob", "Avg CLV Fair Prob SE"} <= set(header)
     model_row = ws.values[header_idx + 1]
     guard_row = next(r for r in ws.values if r and r[0] == "Injury / RLM Guard Suppressed")
     assert len(model_row) == len(header)
@@ -155,9 +157,141 @@ def test_sheet_has_weekly_clv_section(monkeypatch):
 
     cm.write_google_sheet_scorecard(summary, guard, pd.DataFrame())
 
-    title_idx = next(i for i, r in enumerate(ws.values) if r and str(r[0]).startswith("WEEKLY AVG CLV WIN PROB"))
+    title_idx = next(i for i, r in enumerate(ws.values) if r and str(r[0]).startswith("WEEKLY AVG CLV FAIR PROB"))
     assert ws.values[title_idx + 1] == ["Model", "Tier", "Weeks +", "Wk 9", "Wk 10"]
     row = ws.values[title_idx + 2]
     assert row[0] == "Model v1 (Master_Bets Baseline)"
     assert row[2] == "1/2 (50%)"
     assert row[3].startswith("+") and row[4].startswith("-")
+
+
+IN_WEEK_TS = "2026-11-17T16:00:00+00:00"
+LEGACY_TS = "2026-10-27T16:00:00+00:00"
+
+
+def test_parse_logged_at_handles_both_formats():
+    a = cm.parse_logged_at("2026-11-03 21:25:00 UTC")
+    b = cm.parse_logged_at("2026-11-03T21:25:00.123456+00:00")
+    assert a is not None and b is not None
+    assert a.year == 2026 and a.hour == 21 and b.minute == 25
+    assert cm.parse_logged_at("") is None and cm.parse_logged_at(None) is None
+    cutoff = cm.parse_logged_at(cm.SHADOW_LEGACY_CUTOFF_UTC)
+    assert cm.parse_logged_at("2026-11-02 23:59:59 UTC") < cutoff <= cm.parse_logged_at("2026-11-03T00:00:00+00:00")
+
+
+def test_shadow_row_regime_rules():
+    regimes = {"G_NEW": "in_week", "G_OLD": "lookahead", "G_BLANK": ""}
+    assert cm.shadow_row_regime({"game_id": "G_NEW", "logged_at_utc": IN_WEEK_TS}, regimes) == "in_week"
+    assert cm.shadow_row_regime({"game_id": "G_NEW", "logged_at_utc": "2026-11-17 16:00:00 UTC"}, regimes) == "in_week"
+    assert cm.shadow_row_regime({"game_id": "G_NEW", "logged_at_utc": LEGACY_TS}, regimes) == "legacy"
+    assert cm.shadow_row_regime({"game_id": "G_OLD", "logged_at_utc": IN_WEEK_TS}, regimes) == "legacy"
+    assert cm.shadow_row_regime({"game_id": "G_BLANK", "logged_at_utc": IN_WEEK_TS}, regimes) == "legacy"
+    assert cm.shadow_row_regime({"game_id": "G_MISSING", "logged_at_utc": IN_WEEK_TS}, regimes) == "legacy"
+    assert cm.shadow_row_regime({"game_id": "G_NEW", "logged_at_utc": ""}, regimes) == "legacy"
+
+
+def _with(row, **kw):
+    row = dict(row)
+    row.update(kw)
+    return row
+
+
+def test_legacy_pick_and_in_week_pass_land_in_different_blocks():
+    master = pd.DataFrame([
+        {"game_id": "2026_09_DAL_IND", "decision_regime": "", "closing_line": -4.0},
+        {"game_id": "2026_12_NYJ_BUF", "decision_regime": "in_week", "closing_line": -4.0},
+    ])
+    v3 = pd.DataFrame([
+        _with(_v3_pick("2026_09_DAL_IND", "0.60", week=9), logged_at_utc=LEGACY_TS),
+        _with(_v3_pick("2026_12_NYJ_BUF", "0.51", week=12), logged_at_utc=IN_WEEK_TS, v3_decision="PASS", v3_edge="0.004"),
+    ])
+    scores = {
+        "2026_09_DAL_IND": {"home_score": 24, "away_score": 21},
+        "2026_12_NYJ_BUF": {"home_score": 24, "away_score": 21},
+    }
+    blocks = cm.evaluate_regimes(master, pd.DataFrame(), v3, scores)
+    v3_in = next(r for r in blocks["in_week"][0] if r["model"].startswith("Model v3 (EPA"))
+    v3_old = next(r for r in blocks["legacy"][0] if r["model"].startswith("Model v3 (EPA"))
+    assert v3_in["bets"] == 0
+    assert v3_old["bets"] == 1
+
+
+def test_in_week_row_is_not_shadowed_by_earlier_legacy_row_for_same_game():
+    master = pd.DataFrame([{"game_id": "2026_12_NYJ_BUF", "decision_regime": "in_week", "closing_line": -4.0}])
+    v3 = pd.DataFrame([
+        _with(_v3_pick("2026_12_NYJ_BUF", "0.51", week=12), logged_at_utc=LEGACY_TS, v3_decision="PASS"),
+        _with(_v3_pick("2026_12_NYJ_BUF", "0.60", week=12), logged_at_utc=IN_WEEK_TS),
+    ])
+    scores = {"2026_12_NYJ_BUF": {"home_score": 24, "away_score": 21}}
+    blocks = cm.evaluate_regimes(master, pd.DataFrame(), v3, scores)
+    v3_in = next(r for r in blocks["in_week"][0] if r["model"].startswith("Model v3 (EPA"))
+    assert v3_in["bets"] == 1
+
+
+def test_v1_bets_split_by_master_decision_regime():
+    def bet(gid, regime):
+        return {"game_id": gid, "week": 12, "pick_team": "BUF", "pick_side": "HOME", "pick_line": -3.0,
+                "pick_odds": -110, "closing_line": -3.5, "decision_regime": regime}
+
+    master = pd.DataFrame([bet("A", "in_week"), bet("B", "lookahead"), bet("C", "")])
+    scores = {g: {"home_score": 24, "away_score": 20} for g in "ABC"}
+    blocks = cm.evaluate_regimes(master, pd.DataFrame(), pd.DataFrame(), scores)
+    assert blocks["in_week"][0][0]["bets"] == 1
+    assert blocks["legacy"][0][0]["bets"] == 2
+
+
+def test_guard_ignores_suppress_rows_below_edge_threshold():
+    master = pd.DataFrame([
+        {"game_id": "G1", "decision_regime": "", "closing_line": -4.0},
+        {"game_id": "G2", "decision_regime": "", "closing_line": -4.0},
+    ])
+    v3 = pd.DataFrame([
+        _with(_v3_pick("G1", "0.55"), v3_decision="SUPPRESS_DANGER", v3_edge="0.0153", logged_at_utc=LEGACY_TS),
+        _with(_v3_pick("G2", "0.56"), v3_decision="SUPPRESS_DANGER", v3_edge="0.0221", logged_at_utc=LEGACY_TS),
+    ])
+    v4 = pd.DataFrame([{
+        "game_id": "G1", "week": 10, "v4_decision": "SUPPRESS_DANGER", "v4_best_side": "HOME",
+        "v4_best_line": "3.5", "v4_best_odds": "-110", "v4_edge": "0.0101", "logged_at_utc": "2026-10-27 16:00:00 UTC",
+    }])
+    scores = {g: {"home_score": 24, "away_score": 21} for g in ("G1", "G2")}
+    _, guard, counts = cm.evaluate_all_models(master, pd.DataFrame(), v3, scores, v4_df=v4)
+    assert guard["bets"] == 1
+    assert counts["suppressed_count"] == 1
+
+
+def test_sheet_has_separate_legacy_block(monkeypatch):
+    ws = _FakeWorksheet()
+    monkeypatch.setattr(cm, "get_or_create_worksheet", lambda _name: ws)
+    in_week = [cm.compute_metrics([], "Model v1 (Master_Bets Baseline)")]
+    legacy_bets = [cm.grade_single_bet("HOME", -3.0, -110, 24, 20, closing_line=-3.5, week=9)]
+    legacy = ([cm.compute_metrics(legacy_bets, "Model v1 (Master_Bets Baseline)")],
+              cm.compute_metrics([], "Guard", "Hypothetical Placed"))
+    guard = cm.compute_metrics([], "Guard", "Hypothetical Placed")
+
+    cm.write_google_sheet_scorecard(in_week, guard, pd.DataFrame(), legacy=legacy)
+
+    firsts = [r[0] if r else "" for r in ws.values]
+    legacy_idx = next(i for i, v in enumerate(firsts) if str(v).startswith("LEGACY"))
+    weekly_idx = next(i for i, v in enumerate(firsts) if str(v).startswith("WEEKLY AVG CLV"))
+    summary_idx = firsts.index("Model")
+    assert summary_idx < legacy_idx
+    assert ws.values[legacy_idx + 1] == list(cm.SCORECARD_HEADER)
+    assert ws.values[legacy_idx + 2][2] == 1  # the legacy bet
+    assert ws.values[summary_idx + 1][2] == 0  # in-week block is empty
+    # weekly CLV (promotion input) is built from in-week rows only: no week columns
+    assert ws.values[weekly_idx + 1] == ["Model", "Tier", "Weeks +"]
+
+
+def test_weekly_clv_uses_price_aware_number_when_prices_exist():
+    # Same line at the close, but the price moved against the pick: line-only CLV is 0,
+    # the price-aware number is negative, and the week must count as not positive.
+    priced = cm.grade_single_bet(
+        "HOME", -3.0, -110, 24, 20, closing_line=-3.0, week=12,
+        open_home_odds=-110, open_away_odds=-110,
+        close_single_line=-3.0, close_home_odds=105, close_away_odds=-125,
+    )
+    assert priced["clv_prob"] == pytest.approx(0.0)
+    assert priced["clv_fair_prob"] < 0
+    m = cm.compute_metrics([priced], "test")
+    assert m["weekly_clv_prob_pct"][12] == pytest.approx(priced["clv_fair_prob"] * 100.0, abs=0.01)
+    assert m["clv_positive_weeks"] == 0
