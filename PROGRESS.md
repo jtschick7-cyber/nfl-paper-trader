@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `claude/p0-7-v4-qb-shock` (PR open). R1–R5 and audit Phases 1–2 merged as PRs #14–#20.
-- **Last task:** Audit P0-7 v4 QB shock fix and v4 study (2026-11-21); results in `notes/p0-7-v4-qb-study.md`.
-- **Next task:** Phase 3 market structure. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Branch:** `claude/phase3-market-consensus` (PR open). R1–R5, audit Phases 1–2 and P0-7 merged as PRs #14–#21.
+- **Last task:** Audit Phase 3 consensus pricer and archive replay (2026-11-21); results in `notes/phase3-market-consensus.md`.
+- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
 - **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
@@ -22,9 +22,18 @@
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check pending |
 | Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR #19), live check pending |
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
-| Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR) |
+| Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
+| Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR), live tab held |
 
 ## Log
+
+### 2026-11-21: Audit Phase 3 consensus pricer and archive replay
+
+- Offline only: no Sheet tab, workflow or decision change.
+- `src/market_consensus.py` (per-book m*, leave-one-out trimmed weighted consensus, EV per offer, stale flag at EV >= 1%, key-number cross), `src/load_odds_archive.py` (reads `odds-data` via git), `src/topdown_replay.py` (price-aware CLV against the closing consensus, game-clustered SE).
+- Archive: 40 snapshots, 1–20 Nov 2026, 63 games. Flagged 38 offers on 21 games: closing EV +2.4% ± 1.0%, 68% beat the close, 15-14 graded. Promising, too small.
+- Pre-registered pass: >= 100 flagged on >= 40 games, closing EV > 0 by >= 2 SE; only then a live `TopDown_Shadow` tab.
+- Tests: 1,629 passed.
 
 ### 2026-11-21: Audit P0-7 v4 QB shock and v4 study
 
