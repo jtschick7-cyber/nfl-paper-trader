@@ -51,6 +51,19 @@ V3_FEATURES = [
 ]
 
 
+# Offence and defence kept apart (P0-1 follow-up), positive favouring home
+SPLIT_EPA_FEATURES = [
+    "diff_off_pass", "diff_def_pass", "diff_off_rush", "diff_def_rush",
+    "diff_off_early_down", "diff_def_early_down", "diff_off_success", "diff_def_success",
+]
+
+
+def feature_bounds(features):
+    """Constrained-ridge bounds: division is free, every other feature >= 0."""
+    lb = np.array([-np.inf if f == "division" else 0.0 for f in features])
+    return lb, np.full(len(features), np.inf)
+
+
 # Bounds for V3_FEATURES:
 # Efficiency, margin, elo, rest must be >= 0 (cannot hurt margin)
 # Division is unconstrained
@@ -80,9 +93,10 @@ ELO_HFA = 48.0  # ~2.0 points of spread value
 ELO_REVERSION = 0.33  # 1/3 reversion to mean between seasons
 
 
-def update_elo(home_elo, away_elo, actual_margin):
-    """Updates team Elo ratings based on game outcome and margin of victory."""
-    h_adj = home_elo + ELO_HFA
+def update_elo(home_elo, away_elo, actual_margin, hfa=ELO_HFA):
+    """Updates team Elo ratings based on game outcome and margin of victory.
+    hfa=0 for a neutral-site game (P1-2)."""
+    h_adj = home_elo + hfa
     exp_home = 1.0 / (1.0 + 10.0 ** ((away_elo - h_adj) / 400.0))
 
     if actual_margin > 0:
@@ -101,15 +115,25 @@ def update_elo(home_elo, away_elo, actual_margin):
     return home_elo + shift, away_elo - shift
 
 
-def build_v3_training_dataset(seasons, epa_df, sched_df):
+def is_neutral_site(game):
+    return str(game.get("location", "") or "").strip().lower() == "neutral"
+
+
+def build_v3_training_dataset(seasons, epa_df, sched_df, matchup_version="legacy", neutral_sites=False):
     """
     Builds a leak-free point-in-time training dataset combining Elo,
     rolling play-by-play EPA features, and schedule context.
     Warms up Elo and rolling metrics starting from 2020.
+
+    Defaults reproduce the committed v3 artifact's features. matchup_version="fixed" uses
+    the correct-sign EPA matchup and adds the split offence/defence columns (P0-1);
+    neutral_sites=True gives a neutral-site game no Elo home edge (P1-2). Every row also
+    carries home_field (0 at a neutral site, else 1).
     """
     sched = sched_df.dropna(subset=["home_score", "away_score", "kickoff_utc"]).copy()
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True)
-    sched = sched.sort_values("kickoff_utc").reset_index(drop=True)
+    # game_id breaks kickoff ties so the row order never depends on the input order (P1-4)
+    sched = sched.sort_values(["kickoff_utc", "game_id"], kind="stable").reset_index(drop=True)
 
     # Track Elo ratings and team histories dynamically
     elo_ratings = {}
@@ -127,7 +151,10 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
         home_score = float(game["home_score"])
         away_score = float(game["away_score"])
         actual_margin = home_score - away_score
-        spread_line = float(game["spread_line"]) if pd.notna(game.get("spread_line")) else 0.0
+        # A missing line is unknown, not a pick'em (P1-4): NaN rows are left out of the market fits
+        spread_line = float(game["spread_line"]) if pd.notna(game.get("spread_line")) else np.nan
+        neutral = is_neutral_site(game)
+        hfa = 0.0 if (neutral_sites and neutral) else ELO_HFA
 
         # Handle off-season Elo reversion to mean
         if current_season is not None and season != current_season:
@@ -137,7 +164,7 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
 
         h_elo = elo_ratings.get(home, ELO_INITIAL)
         a_elo = elo_ratings.get(away, ELO_INITIAL)
-        elo_diff = (h_elo + ELO_HFA) - a_elo
+        elo_diff = (h_elo + hfa) - a_elo
 
         # Rest days calculation (Eastern calendar days)
         local_day = kickoff.tz_convert("America/New_York").normalize()
@@ -162,7 +189,7 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
         # Point-in-time EPA features
         if season in seasons:
             epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2, opponent_adjust=False)
-            epa_matchup = get_matchup_epa_features(epa_snap, home, away)
+            epa_matchup = get_matchup_epa_features(epa_snap, home, away, version=matchup_version)
 
             if epa_matchup is not None:
                 diff_pass_epa = epa_matchup["diff_pass_epa"]
@@ -174,6 +201,11 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
                 diff_rush_epa = 0.0
                 diff_success = 0.0
                 diff_early = 0.0
+
+            split = {}
+            if matchup_version == "fixed":
+                for k in SPLIT_EPA_FEATURES:
+                    split[k] = epa_matchup[k] if epa_matchup is not None else 0.0
 
             # Record feature row
             rows.append({
@@ -193,10 +225,12 @@ def build_v3_training_dataset(seasons, epa_df, sched_df):
                 "diff_margin": diff_margin,
                 "diff_rest": diff_rest,
                 "division": division,
+                "home_field": 0.0 if neutral else 1.0,
+                **split,
             })
 
         # Update post-game state (leak-free)
-        new_h_elo, new_a_elo = update_elo(h_elo, a_elo, actual_margin)
+        new_h_elo, new_a_elo = update_elo(h_elo, a_elo, actual_margin, hfa=hfa)
         elo_ratings[home] = new_h_elo
         elo_ratings[away] = new_a_elo
 

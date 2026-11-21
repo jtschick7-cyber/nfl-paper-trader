@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `claude/phase1-safety-fixes` (PR open). R1–R5 merged as PRs #14–#18.
-- **Last task:** Audit Phase 1, safety and pipeline fixes (2026-11-21). Source: the owner's audit `nfl_paper_trader_audit_and_fix_plan.md` (not in repo).
-- **Next task:** audit Phase 2 (EPA sign + scramble fix, offline walk-forward study first). Owner must decide first whether a retrain may interrupt the R3 raw-lean test (it changes `artifact_id`).
+- **Branch:** `claude/phase2-feature-study` (stacked on `claude/phase1-safety-fixes`, PR #19). R1–R5 merged as PRs #14–#18.
+- **Last task:** Audit Phase 2 offline EPA feature study (2026-11-21); results in `notes/phase2-feature-study.md`.
+- **Next task:** v4 QB shock (P0-7) and v4 study, or Phase 3 market structure. No retrain queued: the study found no betting gain.
 - **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
 - **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
@@ -20,9 +20,19 @@
 | R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR), backfill and live check pending |
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | done (PR #17) |
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check pending |
-| Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR), live check pending |
+| Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR #19), live check pending |
+| Audit Phase 2 feature study | `notes/phase2-feature-study.md` | study done (PR), v4/QB pending |
 
 ## Log
+
+### 2026-11-21: Audit Phase 2 offline feature study
+
+- Owner: offline study only, no `.pkl` changes; stacked on Phase 1.
+- `epa_features`: `play_split="dropback"` (no scramble double count) and `version="fixed"` (correct sign plus offence/defence split). Defaults stay legacy, so the live loggers and artifacts are unchanged.
+- v3 builder: `matchup_version`, `neutral_sites`, a `home_field` column, a game_id kickoff tiebreak, NaN for missing lines; `_load_sched` keeps `location`.
+- `backtest_production --feature-set legacy|sign|sign_scramble|split|split_neutral`.
+- Result: no gate improves beyond noise (log loss within 0.0002, RMSE 12.873 → 12.869); recommend folding split_neutral into the next off-season retrain.
+- Tests: 1,610 passed.
 
 ### 2026-11-21: Audit Phase 1 safety fixes
 

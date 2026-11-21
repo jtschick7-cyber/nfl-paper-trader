@@ -30,9 +30,37 @@ EPA_CACHE_DIR = "data/epa_cache"
 os.makedirs(EPA_CACHE_DIR, exist_ok=True)
 
 
-def parse_pbp_to_game_epa(pbp_df):
+PLAY_SPLITS = ("legacy", "dropback")
+
+
+def _pass_rush_masks(df, play_split):
+    """(is_pass, is_rush) boolean Series.
+
+    legacy: pass == 1 or play_type == pass, rush == 1 or play_type == run. A QB scramble
+    (play_type run, pass 1) lands in both, so its EPA is counted as a pass and as a rush.
+    dropback (P0-2): a dropback (qb_dropback or pass == 1: passes, sacks, scrambles) is a
+    pass; a rush is a designed run only. The two are disjoint.
+    """
+    def col(name):
+        return df[name] if name in df.columns else pd.Series(0, index=df.index)
+
+    if play_split == "legacy":
+        is_pass = (col("pass") == 1) | (df.get("play_type") == "pass")
+        is_rush = (col("rush") == 1) | (df.get("play_type") == "run")
+        return is_pass, is_rush
+    if play_split != "dropback":
+        raise ValueError(f"unknown play_split {play_split!r}")
+    is_pass = (col("qb_dropback") == 1) | (col("pass") == 1) | (df.get("play_type") == "pass")
+    is_rush = ((col("rush") == 1) | (df.get("play_type") == "run")) & ~is_pass & (col("qb_scramble") != 1)
+    return is_pass, is_rush
+
+
+def parse_pbp_to_game_epa(pbp_df, play_split="legacy"):
     """
     Transforms raw play-by-play dataframe into team-game level offensive and defensive metrics.
+
+    play_split="legacy" reproduces data/team_game_epa.csv (what the committed v3/v4
+    artifacts were trained on); "dropback" stops counting scrambles as rushes (P0-2).
     
     Returns a DataFrame with one row per team per game:
     ['game_id', 'season', 'week', 'team', 'opponent', 'is_home',
@@ -67,8 +95,7 @@ def parse_pbp_to_game_epa(pbp_df):
     df["week"] = pd.to_numeric(df.get("week", 0), errors="coerce").fillna(0).astype(int)
 
     # Identify pass vs rush plays
-    is_pass = (df.get("pass", 0) == 1) | (df.get("play_type") == "pass")
-    is_rush = (df.get("rush", 0) == 1) | (df.get("play_type") == "run")
+    is_pass, is_rush = _pass_rush_masks(df, play_split)
     is_early_down = df.get("down", 1).isin([1, 2])
 
     # Compute offensive metrics per game per team
@@ -236,8 +263,59 @@ def compute_rolling_epa_snapshot(game_epa_df, schedule_df, as_of_utc, window=6, 
     return adjusted
 
 
-def get_matchup_epa_features(snapshot, home_team, away_team):
+MATCHUP_VERSIONS = ("legacy", "fixed")
+
+
+def get_matchup_epa_features(snapshot, home_team, away_team, version="legacy"):
+    """version="legacy" is the formula the committed v3/v4 artifacts were trained on (see
+    _legacy_matchup). version="fixed" (P0-1) is _fixed_matchup."""
+    if version == "legacy":
+        return _legacy_matchup(snapshot, home_team, away_team)
+    if version == "fixed":
+        return _fixed_matchup(snapshot, home_team, away_team)
+    raise ValueError(f"unknown matchup version {version!r}")
+
+
+def _fixed_matchup(snapshot, home_team, away_team):
     """
+    Correct-sign matchup features (P0-1). def_* is EPA *allowed* (lower = better defence),
+    so a team's net quality is off - def and the home edge is
+        diff_X = (H_off - H_def) - (A_off - A_def)
+               = (H_off + A_def) - (A_off + H_def)   (home attack vs away defence allowed).
+    Positive always favours home. Also returns offence and defence separately, positive
+    favouring home: diff_off_X = H_off - A_off, diff_def_X = A_def - H_def.
+    """
+    if home_team not in snapshot or away_team not in snapshot:
+        return None
+    h, a = snapshot[home_team], snapshot[away_team]
+    out = {}
+    for key, metric, prior in (("pass", "pass_epa", 0.0), ("rush", "rush_epa", 0.0),
+                               ("early_down", "early_down_epa", 0.0), ("success", "success_rate", 0.45),
+                               ("total", "total_epa", 0.0)):
+        h_off, h_def = h.get(f"roll_off_{metric}", prior), h.get(f"roll_def_{metric}", prior)
+        a_off, a_def = a.get(f"roll_off_{metric}", prior), a.get(f"roll_def_{metric}", prior)
+        off = h_off - a_off
+        dfn = a_def - h_def
+        out[f"diff_off_{key}"] = round(float(off), 4)
+        out[f"diff_def_{key}"] = round(float(dfn), 4)
+        out[f"diff_{key}"] = round(float(off + dfn), 4)
+    out["home_pass_matchup"] = round(float(h.get("roll_off_pass_epa", 0.0) + a.get("roll_def_pass_epa", 0.0)), 4)
+    out["away_pass_matchup"] = round(float(a.get("roll_off_pass_epa", 0.0) + h.get("roll_def_pass_epa", 0.0)), 4)
+    # Same names as the legacy dict, so the 8-feature v3 list works unchanged
+    out["diff_pass_epa"] = out["diff_pass"]
+    out["diff_rush_epa"] = out["diff_rush"]
+    out["diff_early_down_epa"] = out["diff_early_down"]
+    out["diff_success_rate"] = out["diff_success"]
+    out["diff_total_epa"] = out["diff_total"]
+    return out
+
+
+def _legacy_matchup(snapshot, home_team, away_team):
+    """
+    LEGACY (kept for the committed artifacts): pass, rush and early-down reward a weak
+    defence, because def_* is EPA allowed and
+    (H_off - A_def) - (A_off - H_def) = (H_off + H_def) - (A_off + A_def). See P0-1.
+
     Constructs differential matchup features for Home vs Away:
     
     1. diff_pass_epa:

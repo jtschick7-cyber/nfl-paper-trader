@@ -22,3 +22,4 @@ chat-export*.json
 .claude/worktrees/
 data/sheet_dump/
 data/backtest_production_*.csv
+data/team_game_epa_dropback.csv
