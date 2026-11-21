@@ -119,7 +119,8 @@ def is_neutral_site(game):
     return str(game.get("location", "") or "").strip().lower() == "neutral"
 
 
-def build_v3_training_dataset(seasons, epa_df, sched_df, matchup_version="legacy", neutral_sites=False):
+def build_v3_training_dataset(seasons, epa_df, sched_df, matchup_version="legacy", neutral_sites=False,
+                              canonical_teams=False):
     """
     Builds a leak-free point-in-time training dataset combining Elo,
     rolling play-by-play EPA features, and schedule context.
@@ -128,9 +129,14 @@ def build_v3_training_dataset(seasons, epa_df, sched_df, matchup_version="legacy
     Defaults reproduce the committed v3 artifact's features. matchup_version="fixed" uses
     the correct-sign EPA matchup and adds the split offence/defence columns (P0-1);
     neutral_sites=True gives a neutral-site game no Elo home edge (P1-2). Every row also
-    carries home_field (0 at a neutral site, else 1).
+    carries home_field (0 at a neutral site, else 1). canonical_teams=True maps the OAK/SD/STL
+    schedule codes to LV/LAC/LA, the EPA table's codes (P0-7 study); without it those teams'
+    2012-2019 games get no EPA features and no division flag.
     """
     sched = sched_df.dropna(subset=["home_score", "away_score", "kickoff_utc"]).copy()
+    if canonical_teams:
+        from src.model_utils import canonical_team_codes
+        sched = canonical_team_codes(sched)
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True)
     # game_id breaks kickoff ties so the row order never depends on the input order (P1-4)
     sched = sched.sort_values(["kickoff_utc", "game_id"], kind="stable").reset_index(drop=True)
