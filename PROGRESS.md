@@ -4,7 +4,7 @@
 
 - **Branch:** `claude/p0-7-v4-qb-shock` (PR open). R1–R5 and audit Phases 1–2 merged as PRs #14–#20.
 - **Last task:** Audit P0-7 v4 QB shock fix and v4 study (2026-11-21); results in `notes/p0-7-v4-qb-study.md`.
-- **Next task:** Phase 3 market structure. No retrain queued. Off-season: v3 retrain with `split_neutral_teams`; owner to decide on retiring v4.
+- **Next task:** Phase 3 market structure. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
 - **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
