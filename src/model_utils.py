@@ -181,6 +181,10 @@ def _normalize_schedule(raw):
         "location",
         "home_rest",
         "away_rest",
+        "home_qb_id",
+        "away_qb_id",
+        "home_qb_name",
+        "away_qb_name",
     ]
 
     for col in optional_cols:
@@ -253,6 +257,20 @@ def _load_sched(seasons):
         raw = pd.DataFrame()
 
     return _normalize_schedule(raw)
+
+
+# nflverse schedules keep a relocated franchise's old code for its old seasons; the EPA, QB
+# and turnover tables (nflfastR play-by-play) use the current code throughout.
+LEGACY_TEAM_CODES = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
+
+
+def canonical_team_codes(sched):
+    """Copy of a schedule with OAK/SD/STL mapped to LV/LAC/LA in home_team and away_team."""
+    out = sched.copy()
+    for col in ("home_team", "away_team"):
+        if col in out.columns:
+            out[col] = out[col].astype(str).str.upper().str.strip().replace(LEGACY_TEAM_CODES)
+    return out
 
 
 def _team_panel(sched):

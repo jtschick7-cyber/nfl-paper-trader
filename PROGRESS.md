@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `claude/phase2-feature-study` (stacked on `claude/phase1-safety-fixes`, PR #19). R1–R5 merged as PRs #14–#18.
-- **Last task:** Audit Phase 2 offline EPA feature study (2026-11-21); results in `notes/phase2-feature-study.md`.
-- **Next task:** v4 QB shock (P0-7) and v4 study, or Phase 3 market structure. No retrain queued: the study found no betting gain.
+- **Branch:** `claude/p0-7-v4-qb-shock` (PR open). R1–R5 and audit Phases 1–2 merged as PRs #14–#20.
+- **Last task:** Audit P0-7 v4 QB shock fix and v4 study (2026-11-21); results in `notes/p0-7-v4-qb-study.md`.
+- **Next task:** Phase 3 market structure. No retrain queued. Off-season: v3 retrain with `split_neutral_teams`; owner to decide on retiring v4.
 - **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
 - **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
@@ -21,9 +21,19 @@
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | done (PR #17) |
 | R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check pending |
 | Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR #19), live check pending |
-| Audit Phase 2 feature study | `notes/phase2-feature-study.md` | study done (PR), v4/QB pending |
+| Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
+| Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR) |
 
 ## Log
+
+### 2026-11-21: Audit P0-7 v4 QB shock and v4 study
+
+- Offline only, no `.pkl` changes; defaults stay legacy, so the live v4 logger is unchanged.
+- `qb_version="fixed"`: actual starters in training, a −0.10 backup prior, and a same-shrinkage baseline (0 for an unchanged starter). `fetch_pregame_starter_overrides(version="fixed", week=…)`: decision-week report only, earlier-season backup or `REPLACEMENT_BACKUP`.
+- New bug: OAK/SD/STL schedule codes never matched LV/LAC/LA in the feature tables (about 7% of 2012–2019 rows got zero features). `canonical_teams=True` in the v3 and v4 builders.
+- `backtest_production --feature-set` now covers v4: `legacy`, `qb`, `split_neutral`, `split_neutral_qb`, `split_neutral_qb_teams`; v3 adds `split_neutral_teams`.
+- Result: the QB fix removes the artifact but no gain (log loss 0.69350 → 0.69368; the market prices starter changes). The team-code fix is the best of each model (v3 0.69340). Probe 0 and calibration within 2 SE for all. Recommend retiring v4 at the off-season.
+- Tests: 1,621 passed, 8 Node tests passed.
 
 ### 2026-11-21: Audit Phase 2 offline feature study
 

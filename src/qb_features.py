@@ -38,6 +38,16 @@ DEFAULT_LEAGUE_QB_PRIOR = 0.05
 # An elite QB (+0.25 EPA/db over 36 dropbacks = +9.0 EPA) is worth ~3.5 to 5.0 points on spread.
 EPA_TO_SPREAD_POINTS = 0.38
 
+# Replacement-level backup (P0-7): the prior for a QB who has not been his team's main passer
+# in his sampled games, and the rating of a backup with no dropbacks at all.
+BACKUP_QB_PRIOR = -0.10
+# A dropback share at or above this in a game counts as having been the team's main passer
+STARTER_SHARE = 0.5
+# Sentinel override: the starter is out and no backup can be named (rated at BACKUP_QB_PRIOR)
+REPLACEMENT_BACKUP = "REPLACEMENT_BACKUP"
+QB_SHOCK_VERSIONS = ("legacy", "fixed")
+DROPBACKS_PER_GAME = 35.0
+
 
 def attribute_dropbacks(pbp_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -310,15 +320,155 @@ def get_matchup_qb_comparison(qb_ratings_df: pd.DataFrame, home_team: str, away_
     }
 
 
-def fetch_pregame_starter_overrides(season: int = SEASON, qb_df: pd.DataFrame = None, overrides_path: str = "data/qb_overrides.json") -> dict:
+def _qb_key(row):
+    qid = row.get("qb_id")
+    if qid is not None and not pd.isna(qid) and str(qid) != "UNKNOWN_ID":
+        return ("id", str(qid))
+    return ("name", str(row.get("qb_name")))
+
+
+def _qb_rows(recent, key):
+    col = "qb_id" if key[0] == "id" else "qb_name"
+    if col not in recent.columns:
+        return recent.iloc[0:0]
+    return recent[recent[col].astype(str) == key[1]]
+
+
+def _total_epa(rows):
+    if "total_epa" in rows.columns:
+        return float(rows["total_epa"].sum())
+    for col in ("qb_epa_per_dropback", "epa_per_dropback"):
+        if col in rows.columns:
+            return float((rows["dropbacks"] * rows[col]).sum())
+    return 0.0
+
+
+def fixed_qb_rating(recent, key, window=8, k=SHRINKAGE_K):
+    """
+    P0-7 rating of one QB from his own last `window` games in `recent` (any team):
+    shrunk EPA/dropback toward DEFAULT_LEAGUE_QB_PRIOR if he was his team's main passer
+    (share >= STARTER_SHARE) in any sampled game, else toward BACKUP_QB_PRIOR. A QB with no
+    rows (or the REPLACEMENT_BACKUP sentinel) is rated BACKUP_QB_PRIOR.
+    """
+    if key is None or key[1] == REPLACEMENT_BACKUP:
+        return BACKUP_QB_PRIOR
+    rows = _qb_rows(recent, key)
+    if rows.empty:
+        return BACKUP_QB_PRIOR
+    gids = list(rows.sort_values(["season", "week", "game_id"])["game_id"].unique())[-window:]
+    sample = rows[rows["game_id"].isin(gids)]
+    n_db = int(sample["dropbacks"].sum())
+    if n_db <= 0:
+        return BACKUP_QB_PRIOR
+    if "dropback_share" in sample.columns:
+        established = bool((sample["dropback_share"] >= STARTER_SHARE).any())
+    else:
+        established = bool((sample["dropbacks"] >= 20).any())
+    prior = DEFAULT_LEAGUE_QB_PRIOR if established else BACKUP_QB_PRIOR
+    return shrink_qb_rating(_total_epa(sample) / n_db, n_db, prior_epa=prior, k=k)
+
+
+def fixed_team_qb_shock(recent, team, starter=None, window=8, team_window=6):
+    """
+    P0-7 QB shock for one team, in spread points: this week's starter's rating minus the
+    dropback-weighted rating of the QBs behind the team's last `team_window` games (the games
+    its rolling pass EPA comes from), both rated by fixed_qb_rating. Zero when the same QB
+    threw every dropback; a backup with no history is rated BACKUP_QB_PRIOR, not zero.
+    `starter` is a qb_id, a name or REPLACEMENT_BACKUP; None means last game's main passer.
+    """
+    t_rows = recent[recent["posteam"] == team]
+    if t_rows.empty:
+        return 0.0
+    t_rows = t_rows.sort_values(["season", "week", "game_id"])
+    t_gids = list(t_rows["game_id"].unique())[-team_window:]
+    mix = t_rows[t_rows["game_id"].isin(t_gids)]
+    mix = mix[mix["qb_id"].astype(str) != "UNKNOWN_ID"] if "qb_id" in mix.columns else mix
+    if mix.empty or mix["dropbacks"].sum() <= 0:
+        return 0.0
+
+    if starter is None:
+        last = mix[mix["game_id"] == t_gids[-1]].sort_values("dropbacks", ascending=False)
+        if last.empty:
+            return 0.0
+        s_key = _qb_key(last.iloc[0])
+    elif str(starter) == REPLACEMENT_BACKUP:
+        s_key = ("id", REPLACEMENT_BACKUP)
+    elif "qb_id" in recent.columns and str(starter) in set(recent["qb_id"].astype(str)):
+        s_key = ("id", str(starter))
+    elif "qb_name" in recent.columns and str(starter) in set(recent["qb_name"].astype(str)):
+        s_key = ("name", str(starter))
+    else:
+        s_key = ("id", str(starter))  # no rows anywhere: rated as a replacement backup
+
+    weights = {}
+    for _, r in mix.iterrows():
+        weights[_qb_key(r)] = weights.get(_qb_key(r), 0.0) + float(r["dropbacks"])
+    total = sum(weights.values())
+    baseline = sum(w * fixed_qb_rating(recent, q, window) for q, w in weights.items()) / total
+    starter_rating = fixed_qb_rating(recent, s_key, window)
+    return (starter_rating - baseline) * DROPBACKS_PER_GAME * EPA_TO_SPREAD_POINTS
+
+
+def _injury_report(season, week, version):
+    import time
+    cache_path = "data/nflverse_cache/injuries.csv"
+    inj = None
+    if os.path.exists(cache_path) and (time.time() - os.path.getmtime(cache_path)) < 6 * 3600:
+        inj = pd.read_csv(cache_path)
+    else:
+        import nfl_data_py as nfl
+        inj = nfl.import_injuries([season])
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        inj.to_csv(cache_path, index=False)
+    if inj is None or inj.empty or "report_status" not in inj.columns:
+        return None
+    inj = inj[inj["position"] == "QB"] if "position" in inj.columns else inj
+    if "week" in inj.columns and not inj.empty:
+        if version == "fixed" and week is not None:
+            # Only the decision week's report. On Tuesday it does not exist yet; last
+            # week's report would flag a QB who was Doubtful and then played (P0-7).
+            inj = inj[pd.to_numeric(inj["week"], errors="coerce") == int(week)]
+        else:
+            inj = inj[inj["week"] == inj["week"].max()]
+    return inj[inj["report_status"].isin(["Out", "Doubtful"])]
+
+
+def _pick_backup(qb_df, team, season, s_id, out_ids):
+    """Fixed-version backup: the team's QB with most current-season dropbacks, else the most
+    recent earlier season's, never the starter or a QB ruled out; else REPLACEMENT_BACKUP."""
+    rows = qb_df[(qb_df["posteam"] == team) & (qb_df["qb_id"].astype(str) != s_id)]
+    rows = rows[~rows["qb_id"].astype(str).isin(out_ids) & (rows["qb_id"].astype(str) != "UNKNOWN_ID")]
+    if "season" in rows.columns:
+        rows = rows[rows["season"] <= season]
+        for yr in sorted(rows["season"].unique(), reverse=True):
+            totals = rows[rows["season"] == yr].groupby("qb_id")["dropbacks"].sum().sort_values(ascending=False)
+            if not totals.empty:
+                return str(totals.index[0])
+    elif not rows.empty:
+        return str(rows.groupby("qb_id")["dropbacks"].sum().sort_values(ascending=False).index[0])
+    return REPLACEMENT_BACKUP
+
+
+def fetch_pregame_starter_overrides(season: int = SEASON, qb_df: pd.DataFrame = None, overrides_path: str = "data/qb_overrides.json",
+                                    version: str = "legacy", week: int = None) -> dict:
     """
     Returns {team_abbr: qb_id_or_name} overrides for the upcoming game.
     1. Manual overrides from `overrides_path` JSON (highest priority).
     2. Automatic: if a team's most recent starter in `qb_df` is listed as Out/Doubtful
        in the latest-week injury report, substitute the team's next QB (most prior dropbacks).
+    version="fixed" (P0-7, opt-in; the live logger uses legacy): reads only `week`'s injury
+    report (none on a Tuesday, so no automatic override then), and when no other QB has
+    current-season dropbacks takes the team's QB from an earlier season, else emits
+    REPLACEMENT_BACKUP (rated at BACKUP_QB_PRIOR by the fixed shock).
     Never raises (offline/CI safe).
     """
     import json
+
+    if version not in QB_SHOCK_VERSIONS:
+        raise ValueError(f"unknown QB shock version {version!r}")
+    if version == "fixed":
+        return _fetch_overrides_fixed(season, qb_df, overrides_path, week)
+
     import time
 
     overrides = {}
@@ -384,6 +534,48 @@ def fetch_pregame_starter_overrides(season: int = SEASON, qb_df: pd.DataFrame = 
     except Exception:
         pass
 
+    overrides.update(manual)
+    return overrides
+
+
+def _load_manual_overrides(overrides_path):
+    import json
+    try:
+        if overrides_path and os.path.exists(overrides_path):
+            with open(overrides_path, "r") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                return {str(k).upper().strip(): str(v) for k, v in loaded.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _fetch_overrides_fixed(season, qb_df, overrides_path, week):
+    overrides = {}
+    manual = _load_manual_overrides(overrides_path)
+    try:
+        if qb_df is not None and not qb_df.empty:
+            out = _injury_report(season, week, "fixed")
+            if out is not None and not out.empty:
+                cur = qb_df[qb_df["season"] == season] if "season" in qb_df.columns else qb_df
+                for team, t_rows in cur.groupby("posteam"):
+                    t_out = out[out["team"] == team] if "team" in out.columns else out.iloc[0:0]
+                    if t_out.empty:
+                        continue
+                    t_rows = t_rows.sort_values(["season", "week", "game_id"])
+                    last = t_rows[t_rows["game_id"] == t_rows["game_id"].iloc[-1]].sort_values("dropbacks", ascending=False)
+                    starter = last.iloc[0]
+                    s_id = str(starter.get("qb_id"))
+                    s_last = str(starter.get("qb_name", "")).split(".")[-1].split(" ")[-1].lower()
+                    out_ids = set(t_out["gsis_id"].astype(str)) if "gsis_id" in t_out.columns else set()
+                    ruled_out = s_id in out_ids or (
+                        "full_name" in t_out.columns and bool(s_last)
+                        and any(str(n).lower().endswith(s_last) for n in t_out["full_name"]))
+                    if ruled_out:
+                        overrides[team] = _pick_backup(qb_df, team, season, s_id, out_ids)
+    except Exception:
+        pass
     overrides.update(manual)
     return overrides
 

@@ -35,8 +35,13 @@ from src.price_anchor import PRODUCTION_VARIANT, artifact_fields, attach_market_
 from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
 from src.model_v2_core import ConstrainedRidgeModel
-from src.qb_features import DEFAULT_LEAGUE_QB_PRIOR, EPA_TO_SPREAD_POINTS, shrink_qb_rating
-from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
+from src.qb_features import (
+    DEFAULT_LEAGUE_QB_PRIOR, EPA_TO_SPREAD_POINTS, QB_SHOCK_VERSIONS, fixed_team_qb_shock, shrink_qb_rating,
+)
+from src.model_utils import canonical_team_codes
+from src.train_model_v3 import (
+    ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, SPLIT_EPA_FEATURES, is_neutral_site, update_elo,
+)
 from src.turnover_luck import TURNOVER_PRIOR_RECOVERY_RATE, shrink_turnover_rate
 
 MODEL_PATH = "models/nfl_spread_model_v4.pkl"
@@ -83,16 +88,50 @@ def fit_constrained_ridge(X_scaled, y, alpha=15.0, bounds=(V4_BOUNDS_LB, V4_BOUN
     return ConstrainedRidgeModel(res.x, y_mean)
 
 
-def compute_point_in_time_qb_shock(qb_df, past_gids, home_team, away_team, h_pass_epa, a_pass_epa, starter_overrides=None, window=8):
+def v4_feature_list(split=False, home_field=False):
+    """V4_FEATURES, or (audit Phase 2) offence and defence EPA split, plus home_field."""
+    if not split:
+        feats = list(V4_FEATURES)
+    else:
+        feats = ["elo_diff"] + SPLIT_EPA_FEATURES + [
+            "diff_margin", "diff_rest", "division", "diff_qb_shock", "diff_fumble_luck_per_gm"]
+    return feats + (["home_field"] if home_field else [])
+
+
+def v4_feature_bounds(features):
+    """V4 bounds by name: division free, fumble luck <= 0, every other feature >= 0."""
+    lb = np.array([-np.inf if f in ("division", "diff_fumble_luck_per_gm") else 0.0 for f in features])
+    ub = np.array([0.0 if f == "diff_fumble_luck_per_gm" else np.inf for f in features])
+    return lb, ub
+
+
+def compute_point_in_time_qb_shock(qb_df, past_gids, home_team, away_team, h_pass_epa, a_pass_epa, starter_overrides=None, window=8,
+                                   version="legacy", team_window=6):
     """
+    version="fixed" (P0-7, opt-in): qb_features.fixed_team_qb_shock per team, which compares
+    the starter with the QBs behind the team's last `team_window` games under the same
+    shrinkage (no healthy-starter artifact) and rates a backup with no rows at
+    BACKUP_QB_PRIOR instead of returning 0. h_pass_epa / a_pass_epa are not used there.
+    version="legacy" is the formula the committed artifact was trained on:
+
     Computes diff_qb_shock strictly prior to kickoff.
     Identifies each team's active starting QB from past_gids (the team's most recent completed game),
     unless an explicit starter_overrides dict ({team: qb_id_or_name}) is passed.
     Computes their shrunk EPA/db across prior dropbacks strictly in past_gids (up to window games),
     and measures talent differential relative to the team's 6-game pass EPA baseline.
     """
+    if version not in QB_SHOCK_VERSIONS:
+        raise ValueError(f"unknown QB shock version {version!r}")
     if qb_df is None or qb_df.empty or not past_gids:
         return 0.0
+    if version == "fixed":
+        recent = qb_df[qb_df["game_id"].isin(past_gids)]
+        if recent.empty:
+            return 0.0
+        ov = starter_overrides or {}
+        h = fixed_team_qb_shock(recent, home_team, ov.get(home_team), window, team_window)
+        a = fixed_team_qb_shock(recent, away_team, ov.get(away_team), window, team_window)
+        return round(float(h - a), 4)
 
     recent_qb = qb_df[qb_df["game_id"].isin(past_gids)].sort_values(["season", "week", "game_id"])
     if recent_qb.empty:
@@ -200,15 +239,41 @@ def compute_point_in_time_fumble_luck(turnover_df, past_gids, home_team, away_te
     return round(float(diff_luck), 4)
 
 
-def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turnover_df=None):
+def _schedule_starters(game):
+    """{team: gsis_id} of the nflverse starting QBs of a completed game (P0-7 training)."""
+    out = {}
+    for side in ("home", "away"):
+        qid = game.get(f"{side}_qb_id")
+        if qid is not None and not pd.isna(qid) and str(qid).strip():
+            out[str(game[f"{side}_team"]).upper().strip()] = str(qid)
+    return out
+
+
+def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turnover_df=None,
+                              matchup_version="legacy", neutral_sites=False, qb_version="legacy",
+                              canonical_teams=False):
     """
     Builds a leak-free point-in-time training dataset combining Elo,
     rolling play-by-play EPA features, QB attribution shock, and turnover luck.
+
+    Defaults reproduce the committed v4 artifact's features (rows now break kickoff ties by
+    game_id, as v3 does since Phase 2). Opt-in switches (offline study, audit P0-7 / Phase 2):
+    - matchup_version="fixed": correct-sign EPA matchup plus split offence/defence columns.
+    - neutral_sites=True: no Elo home edge at a neutral site. Every row carries home_field.
+    - qb_version="fixed": the shock uses the game's actual starting QBs (nflverse
+      home_qb_id / away_qb_id, known before kickoff) and the fixed formula.
+    - canonical_teams=True: OAK/SD/STL schedule codes mapped to LV/LAC/LA, the codes the
+      EPA, QB and turnover tables use; without it those teams' 2012-2019 rows get no EPA,
+      QB or fumble features and no division flag.
     """
+    if qb_version not in QB_SHOCK_VERSIONS:
+        raise ValueError(f"unknown QB shock version {qb_version!r}")
     # Use full historical schedule to warm up Elo and team histories
     sched = sched_df.dropna(subset=["home_score", "away_score", "kickoff_utc"]).copy()
+    if canonical_teams:
+        sched = canonical_team_codes(sched)
     sched["kickoff_utc"] = pd.to_datetime(sched["kickoff_utc"], utc=True)
-    sched = sched.sort_values("kickoff_utc").reset_index(drop=True)
+    sched = sched.sort_values(["kickoff_utc", "game_id"], kind="stable").reset_index(drop=True)
 
     elo_ratings = {}
     team_last_date = {}
@@ -229,6 +294,8 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
         actual_margin = home_score - away_score
         spread_line = float(game["spread_line"]) if pd.notna(game.get("spread_line")) else 0.0
         total_line = float(game["total_line"]) if pd.notna(game.get("total_line")) else None
+        neutral = is_neutral_site(game)
+        hfa = 0.0 if (neutral_sites and neutral) else ELO_HFA
 
         # Handle off-season Elo reversion
         if current_season is not None and season != current_season:
@@ -238,7 +305,7 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
 
         h_elo = elo_ratings.get(home, ELO_INITIAL)
         a_elo = elo_ratings.get(away, ELO_INITIAL)
-        elo_diff = (h_elo + ELO_HFA) - a_elo
+        elo_diff = (h_elo + hfa) - a_elo
 
         # Rest days (Eastern calendar days)
         local_day = kickoff.tz_convert("America/New_York").normalize()
@@ -262,7 +329,11 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
 
         # Point-in-time EPA features
         epa_snap = compute_rolling_epa_snapshot(epa_df, sched, kickoff, window=6, min_periods=2)
-        epa_matchup = get_matchup_epa_features(epa_snap, home, away)
+        epa_matchup = get_matchup_epa_features(epa_snap, home, away, version=matchup_version)
+        split = {}
+        if matchup_version == "fixed":
+            for k in SPLIT_EPA_FEATURES:
+                split[k] = epa_matchup[k] if epa_matchup is not None else 0.0
 
         if epa_matchup is not None:
             diff_pass_epa = epa_matchup["diff_pass_epa"]
@@ -281,7 +352,9 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
 
         # Model v4 Orthogonal Signals: QB Shock and Fumble Luck
         diff_qb_shock = compute_point_in_time_qb_shock(
-            qb_df, past_completed_gids, home, away, h_pass_epa, a_pass_epa, window=8
+            qb_df, past_completed_gids, home, away, h_pass_epa, a_pass_epa, window=8,
+            starter_overrides=_schedule_starters(game) if qb_version == "fixed" else None,
+            version=qb_version,
         )
         diff_fumble_luck = compute_point_in_time_fumble_luck(
             turnover_df, past_completed_gids, home, away, window=6
@@ -309,10 +382,12 @@ def build_v4_training_dataset(train_seasons, epa_df, sched_df, qb_df=None, turno
                 "division": division,
                 "diff_qb_shock": diff_qb_shock,
                 "diff_fumble_luck_per_gm": diff_fumble_luck,
+                "home_field": 0.0 if neutral else 1.0,
+                **split,
             })
 
         # Post-game updates (leak-free)
-        new_h_elo, new_a_elo = update_elo(h_elo, a_elo, actual_margin)
+        new_h_elo, new_a_elo = update_elo(h_elo, a_elo, actual_margin, hfa=hfa)
         elo_ratings[home] = new_h_elo
         elo_ratings[away] = new_a_elo
 

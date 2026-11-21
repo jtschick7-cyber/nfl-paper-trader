@@ -30,12 +30,17 @@ Limits:
   for decisions (they stay in training, as in production).
 - The integrity guard is not applied (it needs live injury and line-move data).
 
-Feature sets (audit Phase 2, v3 only; offline study, the live artifacts are unchanged):
-  legacy         the committed v3 features
-  sign           correct-sign EPA matchup (P0-1), same 8 features
-  sign_scramble  + scrambles counted as passes only (P0-2)
-  split          + offence and defence as separate features
-  split_neutral  + no Elo home edge at neutral sites, and a home_field feature (P1-2)
+Feature sets (audit Phase 2 and P0-7; offline study, the live artifacts are unchanged):
+  legacy                  the committed features (v3 or v4)
+  sign                    v3: correct-sign EPA matchup (P0-1), same 8 features
+  sign_scramble           v3: + scrambles counted as passes only (P0-2)
+  split                   v3: + offence and defence as separate features
+  split_neutral           + no Elo home edge at neutral sites, and a home_field feature (P1-2)
+  split_neutral_teams     v3: + OAK/SD/STL mapped to the EPA table's LV/LAC/LA
+  qb                      v4: legacy EPA, fixed QB shock (P0-7: actual starters, backup prior,
+                          same-shrinkage baseline)
+  split_neutral_qb        v4: split_neutral + fixed QB shock
+  split_neutral_qb_teams  v4: + OAK/SD/STL mapped to LV/LAC/LA
 
 Writes data/backtest_production_<model>_<anchor>[_<feature set>]_{games,seasons,calibration,probe}.csv
 (<anchor> is line, priceA or priceB). No model files, no Sheet access.
@@ -85,32 +90,63 @@ def v3_spec():
     return ModelSpec("v3", V3_FEATURES, fit_constrained_ridge, use_total=False)
 
 
-FEATURE_SETS = ("legacy", "sign", "sign_scramble", "split", "split_neutral")
+# name: (matchup_version, play_split, neutral_sites, split off/def, qb_version, canonical_teams)
+FEATURE_OPTIONS = {
+    "legacy": ("legacy", "legacy", False, False, "legacy", False),
+    "sign": ("fixed", "legacy", False, False, "legacy", False),
+    "sign_scramble": ("fixed", "dropback", False, False, "legacy", False),
+    "split": ("fixed", "dropback", False, True, "legacy", False),
+    "split_neutral": ("fixed", "dropback", True, True, "legacy", False),
+    "split_neutral_teams": ("fixed", "dropback", True, True, "legacy", True),
+    "qb": ("legacy", "legacy", False, False, "fixed", False),
+    "split_neutral_qb": ("fixed", "dropback", True, True, "fixed", False),
+    "split_neutral_qb_teams": ("fixed", "dropback", True, True, "fixed", True),
+}
+MODEL_FEATURE_SETS = {
+    "v3": ("legacy", "sign", "sign_scramble", "split", "split_neutral", "split_neutral_teams"),
+    "v4": ("legacy", "qb", "split_neutral", "split_neutral_qb", "split_neutral_qb_teams"),
+}
+FEATURE_SETS = tuple(FEATURE_OPTIONS)
 EPA_PATHS = {"legacy": "data/team_game_epa.csv", "dropback": "data/team_game_epa_dropback.csv"}
 
 
-def feature_set_config(name):
-    """(matchup_version, play_split, neutral_sites, features) for a v3 feature set."""
-    from src.train_model_v3 import SPLIT_EPA_FEATURES, V3_FEATURES
-    split = ["elo_diff"] + SPLIT_EPA_FEATURES + ["diff_margin", "diff_rest", "division"]
-    return {
-        "legacy": ("legacy", "legacy", False, list(V3_FEATURES)),
-        "sign": ("fixed", "legacy", False, list(V3_FEATURES)),
-        "sign_scramble": ("fixed", "dropback", False, list(V3_FEATURES)),
-        "split": ("fixed", "dropback", False, split),
-        "split_neutral": ("fixed", "dropback", True, split + ["home_field"]),
-    }[name]
+def feature_set_config(name, model="v3"):
+    """Builder switches and the feature list of a feature set for `model`."""
+    if name not in MODEL_FEATURE_SETS[model]:
+        raise ValueError(f"feature set {name!r} is not defined for {model}")
+    matchup_version, play_split, neutral_sites, split, qb_version, canonical_teams = FEATURE_OPTIONS[name]
+    if model == "v4":
+        from src.train_model_v4 import v4_feature_list
+        features = v4_feature_list(split=split, home_field=neutral_sites)
+    else:
+        from src.train_model_v3 import SPLIT_EPA_FEATURES, V3_FEATURES
+        features = (["elo_diff"] + SPLIT_EPA_FEATURES + ["diff_margin", "diff_rest", "division"]) if split \
+            else list(V3_FEATURES)
+        features += ["home_field"] if neutral_sites else []
+    return {"matchup_version": matchup_version, "play_split": play_split, "neutral_sites": neutral_sites,
+            "qb_version": qb_version, "canonical_teams": canonical_teams, "features": features}
 
 
 def v3_feature_spec(name):
     from src.train_model_v3 import feature_bounds, fit_constrained_ridge
-    features = feature_set_config(name)[3]
+    features = feature_set_config(name, "v3")["features"]
     bounds = feature_bounds(features)
 
     def fit(X, y, alpha=ALPHA):
         return fit_constrained_ridge(X, y, alpha=alpha, bounds=bounds)
 
     return ModelSpec("v3", features, fit, use_total=False)
+
+
+def v4_feature_spec(name):
+    from src.train_model_v4 import fit_constrained_ridge, v4_feature_bounds
+    features = feature_set_config(name, "v4")["features"]
+    bounds = v4_feature_bounds(features)
+
+    def fit(X, y, alpha=ALPHA):
+        return fit_constrained_ridge(X, y, alpha=alpha, bounds=bounds)
+
+    return ModelSpec("v4", features, fit, use_total=True)
 
 
 def load_epa(play_split):
@@ -128,11 +164,6 @@ def load_epa(play_split):
     epa.to_csv(path, index=False)
     print(f"Built {path} from {len(files)} PBP seasons")
     return epa
-
-
-def v4_spec():
-    from src.train_model_v4 import V4_FEATURES, fit_constrained_ridge
-    return ModelSpec("v4", V4_FEATURES, fit_constrained_ridge, use_total=True)
 
 
 # --- fitting -----------------------------------------------------------------------
@@ -450,18 +481,19 @@ def load_dataset(model, feature_set="legacy"):
     from src.model_utils import _load_sched
 
     seasons = list(range(FIRST_SEASON, LAST_SEASON + 1))
-    matchup_version, play_split, neutral_sites, _ = feature_set_config(feature_set)
-    epa = load_epa(play_split)
+    cfg = feature_set_config(feature_set, model)
+    epa = load_epa(cfg["play_split"])
+    sched = _load_sched(list(range(FIRST_SEASON - 2, LAST_SEASON + 1)))
     if model == "v4":
         from src.train_model_v4 import build_v4_training_dataset
-        sched = _load_sched(list(range(FIRST_SEASON - 2, LAST_SEASON + 1)))
         ds = build_v4_training_dataset(seasons, epa, sched, pd.read_csv("data/team_game_qb.csv"),
-                                       pd.read_csv("data/team_game_turnovers.csv"))
+                                       pd.read_csv("data/team_game_turnovers.csv"),
+                                       matchup_version=cfg["matchup_version"], neutral_sites=cfg["neutral_sites"],
+                                       qb_version=cfg["qb_version"], canonical_teams=cfg["canonical_teams"])
     else:
         from src.train_model_v3 import build_v3_training_dataset
-        sched = _load_sched(list(range(FIRST_SEASON - 2, LAST_SEASON + 1)))
-        ds = build_v3_training_dataset(seasons, epa, sched, matchup_version=matchup_version,
-                                       neutral_sites=neutral_sites)
+        ds = build_v3_training_dataset(seasons, epa, sched, matchup_version=cfg["matchup_version"],
+                                       neutral_sites=cfg["neutral_sites"], canonical_teams=cfg["canonical_teams"])
     mkt = sched[["game_id", "spread_line", "home_spread_odds", "away_spread_odds", "total_line"]].rename(
         columns={"spread_line": "mkt_spread_line", "total_line": "mkt_total_line"})
     return ds.merge(mkt.drop_duplicates("game_id"), on="game_id", how="left")
@@ -481,18 +513,21 @@ def main():
     parser.add_argument("--variant", choices=["A", "B"], default=DEFAULT_VARIANT)
     parser.add_argument("--no-total", action="store_true", help="v4 without totals-conditioned sigma")
     parser.add_argument("--feature-set", choices=FEATURE_SETS, default="legacy",
-                        help="v3 only: audit Phase 2 feature variants (offline study)")
+                        help="audit Phase 2 / P0-7 feature variants (offline study); see MODEL_FEATURE_SETS")
     args = parser.parse_args()
-    if args.model == "v4" and args.feature_set != "legacy":
-        parser.error("--feature-set is v3 only")
+    if args.feature_set not in MODEL_FEATURE_SETS[args.model]:
+        parser.error(f"--feature-set {args.feature_set} is not defined for {args.model}: "
+                     + ", ".join(MODEL_FEATURE_SETS[args.model]))
     warnings.filterwarnings("ignore")
 
     t0 = time.time()
-    spec = v4_spec() if args.model == "v4" else v3_feature_spec(args.feature_set)
+    spec = v4_feature_spec(args.feature_set) if args.model == "v4" else v3_feature_spec(args.feature_set)
     if args.no_total:
         spec.use_total = False
     ds = load_dataset(args.model, args.feature_set)
     print(f"Dataset: {len(ds)} games, built in {time.time() - t0:.0f}s")
+    ds_tag = "" if args.feature_set == "legacy" else f"_{args.feature_set}"
+    ds.to_csv(f"{OUT_PREFIX}_{args.model}{ds_tag}_dataset.csv", index=False)
 
     runs = [("line", None), ("price", "A"), ("price", "B")] if args.anchor == "all" else [(args.anchor, args.variant)]
     os.makedirs("data", exist_ok=True)
