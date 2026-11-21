@@ -2,9 +2,10 @@
 
 ## Current state
 
-- **Branch:** `claude/r5-price-consistent-anchor` (PR open). R1–R4 merged as PRs #14–#17.
-- **Last task:** R5, price-consistent anchor (2026-11-14). The R1–R5 plan is complete once it merges.
-- **Next task:** none queued. Live checks below. Owner kept v4 as a second shadow model, not a separate promotion candidate.
+- **Branch:** `claude/phase1-safety-fixes` (PR open). R1–R5 merged as PRs #14–#18.
+- **Last task:** Audit Phase 1, safety and pipeline fixes (2026-11-21). Source: the owner's audit `nfl_paper_trader_audit_and_fix_plan.md` (not in repo).
+- **Next task:** audit Phase 2 (EPA sign + scramble fix, offline walk-forward study first). Owner must decide first whether a retrain may interrupt the R3 raw-lean test (it changes `artifact_id`).
+- **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
 - **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
 - **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
 - **After the next scorecard refresh (R2 merged):** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
@@ -18,9 +19,22 @@
 | R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR), live check pending |
 | R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR), backfill and live check pending |
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | done (PR #17) |
-| R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR), live check pending |
+| R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check pending |
+| Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR), live check pending |
 
 ## Log
+
+### 2026-11-21: Audit Phase 1 safety fixes
+
+- No model artifact retrained; v3/v4 `.pkl` unchanged, so the R3 test is not interrupted.
+- decision.py: no PICK on an assumed (one-sided) price; a finite edge beats NaN. Loggers: NaN edge is PASS, zero prices rejected, v4 stops if the existing rows cannot be read.
+- Outlier guard now gets the raw margin (it was dead on the blended one) and keeps a 0.0 pick'em. Live behaviour change: games with |raw lean| >= 7 pts become SUPPRESS_DANGER.
+- build_features: refresh on missing completed game_ids (not max week, no file-age gate), atomic CSV writes, fail instead of dropping the live season, global SSL bypass removed.
+- Closing: one more upgrade inside T-20m; odds cache 240 s; opening/closing matched by kickoff within 5 days.
+- Scorecard: slate deduped like grading and cut to the decision week, `Bets w/ Close` appended, fallback away price gives line-only CLV, Step Summary gains weekly-CLV and raw-lean tables, Sheet write no longer clears first.
+- Workflows: PBP cache, odds cache on the V3 logger, closing backfill in its own `sheet-writer` job.
+- Deferred: consensus fair prob and EV line shopping (Phase 3), v2 retire-or-retrain (owner), nfl_data_py migration.
+- Tests: 1,604 passed, 8 Node tests passed.
 
 ### 2026-11-14: R5 price-consistent anchor
 

@@ -161,6 +161,25 @@ def retry_api_call(fn, *args, max_attempts=5, delay_seconds=5, **kwargs):
             raise
 
 
+def append_rows_safely(ws, rows, max_attempts=5, delay_seconds=5, **kwargs):
+    """append_rows, retried only when the request was rejected (429 / quota).
+
+    append_rows is not idempotent: after a 5xx or network error the rows may already be in
+    the tab, so a blind retry could append them twice. Those errors are raised instead.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return ws.append_rows(rows, **kwargs)
+        except Exception as exc:
+            text = str(exc)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            rejected = status == 429 or "429" in text or "Quota exceeded" in text or "rate limit" in text.lower()
+            if rejected and attempt < max_attempts:
+                time.sleep(delay_seconds * attempt)
+                continue
+            raise
+
+
 def get_master_sheet():
     """Returns the master worksheet object."""
     return get_or_create_worksheet(MASTER_SHEET_NAME)

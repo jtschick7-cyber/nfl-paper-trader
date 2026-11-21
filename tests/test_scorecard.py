@@ -59,14 +59,29 @@ def test_v3_kelly_stake_map_skips_non_picks():
 
 
 class _FakeWorksheet:
-    def __init__(self):
+    """Models the gspread Worksheet calls the scorecard writer uses."""
+
+    def __init__(self, row_count=1000, col_count=26):
         self.values = None
+        self.row_count, self.col_count = row_count, col_count
+        self.cleared = False
 
     def clear(self):
-        pass
+        self.cleared = True
+
+    def resize(self, rows=None, cols=None):
+        self.row_count = rows or self.row_count
+        self.col_count = cols or self.col_count
 
     def update(self, values, range_name):
-        self.values = values
+        # raw = the grid sent; values = what the tab reads back (trailing blank cells trimmed)
+        self.raw = values
+        self.values = []
+        for r in values:
+            r = list(r)
+            while r and r[-1] == "":
+                r.pop()
+            self.values.append(r)
 
 
 def test_sheet_guard_row_matches_header_width(monkeypatch):
@@ -468,3 +483,45 @@ def test_single_artifact_adds_no_extra_line():
     scores = {"2026_12_NYJ_BUF": {"home_score": 24, "away_score": 21}}
     summary = cm.evaluate_regimes(master, pd.DataFrame(), v3, scores)["in_week"][0]
     assert not any(r["model"].startswith("Model v3 [") for r in summary)
+
+
+def test_scorecard_write_never_clears_and_blanks_the_old_extent(monkeypatch):
+    ws = _FakeWorksheet(row_count=1000, col_count=26)
+    monkeypatch.setattr(cm, "get_or_create_worksheet", lambda _name: ws)
+    summary = [cm.compute_metrics([], "Model v3", "All Picks")]
+    cm.write_google_sheet_scorecard(summary, cm.compute_metrics([], "g", "g"), pd.DataFrame())
+    assert not ws.cleared
+    assert len(ws.raw) == 1000 and all(len(r) == 26 for r in ws.raw)
+    assert ws.raw[-1] == [""] * 26
+
+
+def test_scorecard_write_grows_a_small_tab(monkeypatch):
+    ws = _FakeWorksheet(row_count=5, col_count=3)
+    monkeypatch.setattr(cm, "get_or_create_worksheet", lambda _name: ws)
+    summary = [cm.compute_metrics([], "Model v3", "All Picks")]
+    cm.write_google_sheet_scorecard(summary, cm.compute_metrics([], "g", "g"), pd.DataFrame())
+    assert ws.row_count >= len(ws.raw) and ws.col_count >= len(cm.SCORECARD_HEADER)
+
+
+def test_bets_with_close_counts_only_bets_with_a_recorded_close():
+    bets = [cm.grade_single_bet("HOME", -3.0, -110, 17, 24, closing_line=-3.5),
+            cm.grade_single_bet("HOME", -3.0, -110, 24, 17, closing_line=None)]
+    assert cm.compute_metrics(bets, "m")["bets_with_close"] == 1
+    assert cm.SCORECARD_HEADER[-1] == "Bets w/ Close"
+
+
+@pytest.mark.parametrize("flag,expected", [("TRUE", None), (True, None), ("FALSE", -120.0), ("", -120.0)])
+def test_away_fallback_rows_do_not_supply_a_quoted_away_price(flag, expected):
+    assert cm.shadow_open_away_odds({"away_odds": -120, "away_fallback_used": flag}) == expected
+
+
+def test_first_present_keeps_a_pickem_zero():
+    assert cm._first_present(None, "", float("nan"), 0.0, -3.0) == 0.0
+
+
+def test_active_slate_is_only_the_current_decision_week():
+    future = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=2)
+    later = future + pd.Timedelta(days=7)
+    slate = pd.DataFrame({"week": [12, 12, 13], "kickoff_utc": [str(future), str(future), str(later)],
+                          "is_future": [True, True, True]})
+    assert list(cm.active_slate(slate)["week"]) == [12, 12]

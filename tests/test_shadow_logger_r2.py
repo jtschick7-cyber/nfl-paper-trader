@@ -41,3 +41,10 @@ def test_v4_local_csv_gains_new_columns(tmp_path):
     assert len(df) == 3
     assert df["artifact_id"].isna().iloc[0] and df["artifact_id"].iloc[2] == "z"
     assert df["raw_lean_side"].isna().iloc[0] and df["raw_lean_side"].iloc[2] == "z"
+
+
+@pytest.mark.parametrize("mod", [v2, v3, v4])
+@pytest.mark.parametrize("rec", ["PROCEED", "SUPPRESS", "MANUAL_REVIEW"])
+@pytest.mark.parametrize("edge", [float("nan"), None, "", float("inf")])
+def test_non_finite_edge_is_a_pass(mod, rec, edge):
+    assert mod.shadow_decision(edge, rec) == "PASS"

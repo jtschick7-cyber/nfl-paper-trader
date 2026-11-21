@@ -65,3 +65,18 @@ def test_audit_candidate_pick_proceed_vs_suppress():
     assert suppress_audit.recommendation == "SUPPRESS"
     assert suppress_audit.is_valid is False
     assert any("REVERSE_LINE_MOVEMENT" in f for f in suppress_audit.flags)
+
+
+def test_pickem_current_line_is_not_replaced_by_open_line():
+    # Opened -9, now a pick'em 0.0: a model at +8 is 8 pts off the pick'em, only 1 off the open.
+    alert = audit_candidate_pick(pick_team="KC", pick_side="HOME", open_line=-9.0, current_line=0.0,
+                                 mu_home_margin=8.0, edge=0.03, rlm_threshold=99.0)
+    assert any("SUSPICIOUS_OUTLIER" in f for f in alert.flags)
+
+
+def test_raw_margin_triggers_the_outlier_guard_but_a_blended_one_cannot():
+    # beta ~0.02 shrinks a 10-pt raw disagreement to 0.2 pts, so the guard must see the raw margin.
+    raw_mu, line, beta = 13.0, -3.0, 0.021
+    blended = -line + beta * (raw_mu + line)
+    assert check_model_discrepancy(blended, line) is None
+    assert check_model_discrepancy(raw_mu, line) is not None

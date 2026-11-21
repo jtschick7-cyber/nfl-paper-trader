@@ -27,7 +27,7 @@ from src.odds_utils import get_cached_live_home_spread
 from src.artifacts import artifact_id as build_artifact_id
 import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
-from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
+from src.sheet_utils import append_rows_safely, ensure_tab_headers, get_sheet_as_df, retry_api_call
 from src.v2_sheet_utils import get_or_create_worksheet
 
 MODEL_PATH = "models/nfl_spread_model_v2.pkl"
@@ -136,7 +136,11 @@ def ensure_headers(ws):
 
 def shadow_decision(best_edge, recommendation):
     """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
-    if best_edge < MIN_EDGE_THRESHOLD:
+    try:
+        best_edge = float(best_edge)
+    except (TypeError, ValueError):
+        return "PASS"
+    if not math.isfinite(best_edge) or best_edge < MIN_EDGE_THRESHOLD:
         return "PASS"
     if recommendation == "SUPPRESS":
         return "SUPPRESS_DANGER"
@@ -221,7 +225,7 @@ def main():
     ws = get_or_create_worksheet(SHADOW_TAB)
     ensure_headers(ws)
 
-    records = ws.get_all_records()
+    records = retry_api_call(ws.get_all_records)
 
     existing_keys = set()
 
@@ -293,6 +297,10 @@ def main():
             skipped_bad_odds += 1
             continue
 
+        if not (math.isfinite(home_line) and math.isfinite(home_odds)) or home_odds == 0:
+            skipped_bad_odds += 1
+            continue
+
         away_odds_raw = row.get("opening_away_odds")
 
         away_fallback_used = (
@@ -302,6 +310,9 @@ def main():
         )
 
         away_odds = safe_float(away_odds_raw, -110.0)
+        if not math.isfinite(away_odds) or away_odds == 0:
+            away_odds = -110.0
+            away_fallback_used = True
 
         feats, diag = compute_live_features_from_state(
             ratings,
@@ -466,12 +477,12 @@ def main():
     needed_rows = len(records) + len(new_rows) + 20
 
     if ws.row_count < needed_rows:
-        ws.resize(rows=needed_rows)
+        retry_api_call(ws.resize, rows=needed_rows)
 
     if ws.col_count < len(HEADERS):
-        ws.resize(cols=len(HEADERS))
+        retry_api_call(ws.resize, cols=len(HEADERS))
 
-    ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    append_rows_safely(ws, new_rows, value_input_option="USER_ENTERED")
 
     print("Wrote " + str(len(new_rows)) + " new row(s) to " + SHADOW_TAB + ".")
 

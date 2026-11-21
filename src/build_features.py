@@ -8,15 +8,8 @@ Usage:
 
 import argparse
 import os
-import ssl
 import numpy as np
 import pandas as pd
-
-# Fix macOS Python SSL certificate verification error for urllib/nfl_data_py
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
 
 from src.config import SEASON
 from src.epa_features import parse_pbp_to_game_epa
@@ -26,6 +19,47 @@ from src.turnover_luck import parse_pbp_turnovers
 OUTPUT_FILE = "data/team_game_epa.csv"
 QB_OUTPUT_FILE = "data/team_game_qb.csv"
 TURNOVER_OUTPUT_FILE = "data/team_game_turnovers.csv"
+
+
+def _atomic_to_csv(df, path):
+    """Write to a temp file then rename, so a crash never leaves a half-written CSV."""
+    tmp = f"{path}.tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _reg_game_ids(df):
+    if df is None or df.empty or "game_id" not in df.columns:
+        return set()
+    if "season_type" in df.columns:
+        df = df[df["season_type"] == "REG"]
+    return set(df["game_id"].astype(str).str.strip())
+
+
+def _completed_game_ids(season):
+    from src.model_utils import _load_sched
+    sched = _load_sched([season])
+    comp = sched.dropna(subset=["home_score", "away_score"])
+    return set(comp["game_id"].astype(str).str.strip())
+
+
+def _season_has_completed_games(season):
+    try:
+        return bool(_completed_game_ids(season))
+    except Exception:
+        return False
+
+
+def missing_completed_game_ids(have_game_ids, season, completed_ids=None):
+    """Completed regular-season games of `season` that are absent from `have_game_ids`.
+
+    Compares game_id sets, not max week: a cache holding Thursday's game of week N
+    still lacks that week's Sunday and Monday games (P0-3).
+    """
+    if completed_ids is None:
+        completed_ids = _completed_game_ids(season)
+    have = {str(g).strip() for g in have_game_ids}
+    return {str(g).strip() for g in completed_ids} - have
 
 
 def build_features(seasons=None):
@@ -55,13 +89,10 @@ def build_features(seasons=None):
                 df_s = pd.read_parquet(cache_pbp)
                 if s >= SEASON and df_s is not None and not df_s.empty:
                     try:
-                        from src.model_utils import _load_sched
-                        sched = _load_sched([s])
-                        comp = sched.dropna(subset=["home_score", "away_score"])
-                        max_sched_week = int(comp["week"].max()) if not comp.empty else 0
-                        max_pbp_week = int(df_s["week"].max()) if "week" in df_s.columns else 0
-                        if max_sched_week > max_pbp_week:
-                            print(f"  PBP cache for {s} is stale (PBP Week {max_pbp_week} vs Sched Week {max_sched_week}). Re-downloading...")
+                        missing = missing_completed_game_ids(_reg_game_ids(df_s), s)
+                        if missing:
+                            print(f"  PBP cache for {s} lacks {len(missing)} completed game(s) "
+                                  f"(e.g. {sorted(missing)[0]}). Re-downloading...")
                             df_s = None
                     except Exception as e:
                         print(f"  Warning checking PBP freshness for {s}: {e}")
@@ -86,6 +117,10 @@ def build_features(seasons=None):
                 pbp_dfs.append(df_s)
         except Exception as e:
             print(f"  Warning: Could not load PBP for season {s}: {e}")
+            if s >= SEASON and _season_has_completed_games(s):
+                # Writing the CSVs without the live season would silently run the models on
+                # prior seasons only. Keep the existing CSVs and fail the step instead.
+                raise SystemExit(f"PBP for live season {s} failed to load; existing feature CSVs left unchanged.")
 
     if not pbp_dfs:
         print("No play-by-play data could be loaded.")
@@ -101,7 +136,7 @@ def build_features(seasons=None):
         return
 
     os.makedirs("data", exist_ok=True)
-    game_epa.to_csv(OUTPUT_FILE, index=False)
+    _atomic_to_csv(game_epa, OUTPUT_FILE)
 
     print(f"Successfully processed {len(game_epa):,} team-game records.")
     print(f"Saved to: {OUTPUT_FILE}")
@@ -112,7 +147,7 @@ def build_features(seasons=None):
     game_qb = compute_game_qb_stats(attributed)
 
     if not game_qb.empty:
-        game_qb.to_csv(QB_OUTPUT_FILE, index=False)
+        _atomic_to_csv(game_qb, QB_OUTPUT_FILE)
         print(f"Successfully processed {len(game_qb):,} QB-game records.")
         print(f"Saved to: {QB_OUTPUT_FILE}")
 
@@ -120,7 +155,7 @@ def build_features(seasons=None):
     print("\nExtracting Turnover Luck metrics...")
     game_turnovers = parse_pbp_turnovers(pbp)
     if not game_turnovers.empty:
-        game_turnovers.to_csv(TURNOVER_OUTPUT_FILE, index=False)
+        _atomic_to_csv(game_turnovers, TURNOVER_OUTPUT_FILE)
         print(f"Successfully processed {len(game_turnovers):,} turnover-game records.")
         print(f"Saved to: {TURNOVER_OUTPUT_FILE}")
 
