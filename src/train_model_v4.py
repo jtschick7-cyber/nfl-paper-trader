@@ -26,17 +26,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from scipy.optimize import lsq_linear
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 
 from src.config import SEASON
 from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
 from src.market_blend import blend_margin, fit_market_beta
 from src.price_anchor import PRODUCTION_VARIANT, artifact_fields, attach_market_prices, fit_price_anchor
-from src.key_numbers import calculate_spread_probabilities, calculate_totals_conditioned_sigma
+from src.key_numbers import calculate_spread_probabilities
 from src.model_utils import DIVISION_MAP, _load_sched
-from src.model_v2_core import ConstrainedRidgeModel, fit_calibrator, calibrate_probability
+from src.model_v2_core import ConstrainedRidgeModel
 from src.qb_features import DEFAULT_LEAGUE_QB_PRIOR, EPA_TO_SPREAD_POINTS, shrink_qb_rating
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.turnover_luck import TURNOVER_PRIOR_RECOVERY_RATE, shrink_turnover_rate

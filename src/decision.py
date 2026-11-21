@@ -95,12 +95,16 @@ def shadow_decision(raw_mu, home_line, home_odds, away_odds, *, sigma, market_be
         edge_home = _edge(p_home_cal, home_odds)
         edge_away = _edge(p_away_cal, away_odds)
 
-    if edge_home >= edge_away:
+    # A finite edge beats a NaN one; NaN >= x is False, so compare finiteness first.
+    h_ok, a_ok = math.isfinite(edge_home), math.isfinite(edge_away)
+    pick_home = (h_ok and not a_ok) or (h_ok and a_ok and edge_home >= edge_away) or (not h_ok and not a_ok)
+    if pick_home:
         best_side, best_line, best_odds, best_model_p, best_edge = "HOME", home_line, home_odds, p_home_cal, edge_home
     else:
         best_side, best_line, best_odds, best_model_p, best_edge = "AWAY", -home_line, away_odds, p_away_cal, edge_away
 
-    decision = PICK if (math.isfinite(best_edge) and best_edge >= min_edge) else PASS
+    # A one-sided quote cannot be price-anchored: never bet on an assumed price.
+    decision = PICK if (not price_assumed and math.isfinite(best_edge) and best_edge >= min_edge) else PASS
 
     return {
         "mu_blend": mu,

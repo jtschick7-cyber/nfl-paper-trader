@@ -10,6 +10,7 @@ from src.odds_utils import (
     CACHE_DIR,
     fetch_odds_api,
     find_cached_pregame_closing_spread,
+    match_event_rows,
     parse_spreads,
 )
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df, verify_row_game_ids
@@ -24,6 +25,11 @@ ATTEMPTS_FILE = os.path.join(CACHE_DIR, "closing_attempts.json")
 #    early safety-net capture once after 90-minute NFL inactive lists are priced in.
 EARLY_CAPTURE_MAX_MINUTES = int(os.getenv("EARLY_CAPTURE_MAX_MINUTES", "240"))
 PRIME_CAPTURE_MAX_MINUTES = int(os.getenv("PRIME_CAPTURE_MAX_MINUTES", "60"))
+# 3. Final window (20m -> 2m pre-kickoff): upgrades once more so the recorded close is the
+#    near-final number, not the T-45m one (P1-1).
+FINAL_UPGRADE_MAX_MINUTES = int(os.getenv("FINAL_UPGRADE_MAX_MINUTES", "20"))
+# Odds API response cache age for live closing captures (staggered kickoffs are minutes apart).
+CLOSING_ODDS_MAX_AGE_SECONDS = int(os.getenv("CLOSING_ODDS_MAX_AGE_SECONDS", "240"))
 MIN_LIVE_LEAD_MINUTES = int(os.getenv("MIN_LIVE_LEAD_MINUTES", "2"))
 
 # Post-kickoff / post-settlement cache recovery settings:
@@ -123,9 +129,11 @@ def row_needs_closing(row, now_utc, attempts=None):
     # Already has a closing line: upgrade once if we are now in the prime window
     # and the existing line was captured earlier than PRIME_CAPTURE_MAX_MINUTES pre-kickoff
     # (or if closing_captured_at is missing/blank).
-    if delta <= prime_lead:
-        captured_at = parse_kickoff(row.get("closing_captured_at"))
-        if pd.isna(captured_at) or (kickoff - captured_at) > prime_lead:
+    # and the existing line was captured earlier than that window's start (or if
+    # closing_captured_at is missing/blank). Two upgrade tiers: prime and final.
+    captured_at = parse_kickoff(row.get("closing_captured_at"))
+    for tier_lead in (prime_lead, timedelta(minutes=FINAL_UPGRADE_MAX_MINUTES)):
+        if delta <= tier_lead and (pd.isna(captured_at) or (kickoff - captured_at) > tier_lead):
             return True
 
     return False
@@ -333,7 +341,7 @@ def capture_closing(cache_dir: str = None):
     if normal_targets or dry_targets:
         force_refresh = DRY_RUN_CLOSE and not normal_targets
         try:
-            odds_data = fetch_odds_api(max_age_seconds=900, force_refresh=force_refresh)
+            odds_data = fetch_odds_api(max_age_seconds=CLOSING_ODDS_MAX_AGE_SECONDS, force_refresh=force_refresh)
             spreads = parse_spreads(odds_data)
         except Exception as exc:
             print(f"Warning: Live Odds API fetch unavailable ({exc}). Proceeding with any cached catch-ups.")
@@ -357,8 +365,7 @@ def capture_closing(cache_dir: str = None):
         for idx, row in dry_targets:
             home = str(row.get("home_team", "")).strip().upper()
             away = str(row.get("away_team", "")).strip().upper()
-            mask = (spreads["home_team"] == home) & (spreads["away_team"] == away) if not spreads.empty else pd.Series(dtype=bool)
-            match = spreads[mask] if not spreads.empty else pd.DataFrame()
+            match = match_event_rows(spreads, home, away, parse_kickoff(row.get("kickoff_time")))
 
             if match.empty:
                 print("Would not capture: no odds match for " + away + " @ " + home + ".")
@@ -440,8 +447,7 @@ def capture_closing(cache_dir: str = None):
             away = str(row.get("away_team", "")).strip().upper()
             kickoff = parse_kickoff(row.get("kickoff_time"))
 
-            mask = (spreads["home_team"] == home) & (spreads["away_team"] == away)
-            match = spreads[mask]
+            match = match_event_rows(spreads, home, away, kickoff)
 
             if match.empty:
                 attempts[gid] = attempts.get(gid, 0) + 1

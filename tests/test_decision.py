@@ -92,14 +92,14 @@ class _Proba:
         return [[0.4, 0.6]]
 
 
-@pytest.mark.parametrize("raw_mu,home_line,prices", itertools.product(RAW_MUS, LINES, PRICES))
+@pytest.mark.parametrize("raw_mu,home_line,prices", list(itertools.product(RAW_MUS, LINES, PRICES)))
 def test_v2_matches_inline(raw_mu, home_line, prices):
     cal = ("logistic", (0.01, 0.8))
     got = shadow_decision(raw_mu, home_line, *prices, sigma=13.4977, market_beta=None, calibrator=cal)
     _assert_same(_as_tuple(got), _inline_v2(raw_mu, home_line, *prices, 13.4977, cal))
 
 
-@pytest.mark.parametrize("raw_mu,home_line,prices", itertools.product(RAW_MUS, LINES, PRICES))
+@pytest.mark.parametrize("raw_mu,home_line,prices", list(itertools.product(RAW_MUS, LINES, PRICES)))
 @pytest.mark.parametrize("calibrator", [("logistic", (0.0, V3_SLOPE)), ("identity", None), ("no_edge", (0.0, -0.1)), _Proba(), None])
 def test_v3_matches_inline(raw_mu, home_line, prices, calibrator):
     got = shadow_decision(raw_mu, home_line, *prices, sigma=V3_SIGMA, market_beta=V3_BETA, calibrator=calibrator)
@@ -112,7 +112,7 @@ def test_v3_without_beta_matches_inline():
     _assert_same(_as_tuple(got), _inline_v3(4.0, -3.0, -110, -110, V3_SIGMA, None, cal))
 
 
-@pytest.mark.parametrize("raw_mu,home_line,prices", itertools.product(RAW_MUS, LINES, PRICES))
+@pytest.mark.parametrize("raw_mu,home_line,prices", list(itertools.product(RAW_MUS, LINES, PRICES)))
 @pytest.mark.parametrize("total_line", [None, 37.5, 44.0, 52.5])
 def test_v4_matches_inline(raw_mu, home_line, prices, total_line):
     cal = ("logistic", (0.0, 0.42))
@@ -238,6 +238,23 @@ def test_missing_price_assumes_even_market_and_flags_it():
     d = shadow_decision(-3.0, -3.0, None, -110, anchor_variant="A", **PRICE_RULE)
     assert d["price_assumed"] and d["q_home"] == 0.5
     assert d["decision"] == PASS
+
+
+@pytest.mark.parametrize("prices", [(None, 120), (120, None), (0, 120), (120, 0),
+                                    (float("nan"), 120), (120, float("nan"))])
+@pytest.mark.parametrize("raw_mu", [-30.0, 3.0, 30.0])
+def test_one_sided_quote_is_never_a_pick_under_price_anchor(prices, raw_mu):
+    d = shadow_decision(raw_mu, -3.0, *prices, anchor_variant="A", **PRICE_RULE)
+    assert d["price_assumed"] is True
+    assert d["decision"] == PASS
+
+
+def test_finite_edge_beats_nan_edge_when_choosing_the_side():
+    # Home quoted, away missing: the finite home side is the best side, not the NaN away side.
+    d = shadow_decision(3.0, -3.0, 120, None, anchor_variant="A", **PRICE_RULE)
+    assert d["best_side"] == "HOME" and math.isfinite(d["best_edge"])
+    d = shadow_decision(3.0, -3.0, None, 120, anchor_variant="A", **PRICE_RULE)
+    assert d["best_side"] == "AWAY" and math.isfinite(d["best_edge"])
 
 
 def test_price_anchor_refuses_a_fitted_calibrator():

@@ -61,13 +61,22 @@ def test_row_needs_closing_two_tier_window():
     # Inside prime window (T-35m <= 60m): SHOULD upgrade once!
     assert row_needs_closing(early_captured_row, ko_ts - timedelta(minutes=35))
 
-    # Once upgraded inside prime window (T-35m), subsequent runs (T-10m) are idempotent
+    # A prime capture (T-35m) is not re-fetched before the final window opens (T-25m)...
     prime_captured_row = dict(
         early_captured_row,
         closing_line=-3.0,
         closing_captured_at=(ko_ts - timedelta(minutes=35)).isoformat(),
     )
-    assert not row_needs_closing(prime_captured_row, ko_ts - timedelta(minutes=10))
+    assert not row_needs_closing(prime_captured_row, ko_ts - timedelta(minutes=25))
+    # ...but the T-10m wake upgrades it once to the near-final number (P1-1)
+    assert row_needs_closing(prime_captured_row, ko_ts - timedelta(minutes=10))
+
+    # Once captured inside the final window (T-10m), later runs (T-5m) are idempotent
+    final_captured_row = dict(
+        prime_captured_row,
+        closing_captured_at=(ko_ts - timedelta(minutes=10)).isoformat(),
+    )
+    assert not row_needs_closing(final_captured_row, ko_ts - timedelta(minutes=5))
 
     # If closing_line exists but closing_captured_at is missing, prime window upgrades once
     unverified_row = dict(

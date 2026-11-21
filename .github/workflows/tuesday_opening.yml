@@ -46,6 +46,16 @@ jobs:
             ${{ runner.os }}-odds-cache-
             ${{ runner.os }}-odds-
 
+      - name: Restore play-by-play cache
+        # Past seasons never change; the live season is re-downloaded whenever a completed
+        # game_id is missing from it (src/build_features.py, P0-3).
+        uses: actions/cache@v4
+        with:
+          path: data/epa_cache
+          key: ${{ runner.os }}-pbp-cache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-pbp-cache-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

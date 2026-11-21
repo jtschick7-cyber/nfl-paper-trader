@@ -34,6 +34,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The backfill rewrites Master_Bets rows by index, so it runs in `sheet-writer` like the
+  # other Master_Bets writers, not inside the long-lived monitor job.
+  backfill:
+    if: ${{ inputs.run_backfill == true || inputs.run_backfill == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: sheet-writer
+      cancel-in-progress: false
+
+    env:
+      GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SEASON: "2026"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Restore odds cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/odds_cache
+          key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-odds-cache-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run verified closing line backfill
+        run: python -m src.backfill_closing
+
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 345
@@ -78,10 +120,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run verified closing line backfill
-        if: ${{ inputs.run_backfill == true || inputs.run_backfill == 'true' }}
-        run: python -m src.backfill_closing
-
       # Self-pacing loop: one run that fires (even hours late) stays alive and wakes at
       # fixed leads before each kickoff, since GitHub drops most dense cron triggers.
       - name: Capture closing lines
@@ -111,8 +149,8 @@ jobs:
           key: ${{ runner.os }}-odds-cache-${{ github.run_id }}
 
   scorecard:
-    needs: monitor
-    if: ${{ needs.monitor.outputs.settled_backfilled == 'true' || inputs.refresh_scorecard == true || inputs.refresh_scorecard == 'true' || inputs.run_backfill == true || inputs.run_backfill == 'true' }}
+    needs: [monitor, backfill]
+    if: ${{ always() && needs.monitor.result == 'success' && needs.backfill.result != 'failure' && (needs.monitor.outputs.settled_backfilled == 'true' || inputs.refresh_scorecard == true || inputs.refresh_scorecard == 'true' || inputs.run_backfill == true || inputs.run_backfill == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:

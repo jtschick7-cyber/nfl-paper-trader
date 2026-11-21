@@ -28,6 +28,7 @@ try:
 except ImportError:
     nfl = None
 
+from src.decision_window import current_decision_week
 from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, MIN_EDGE_THRESHOLD, SEASON
 from src.key_numbers import calculate_spread_probabilities, market_implied_mean
 from src.odds_utils import american_to_implied_prob, remove_vig
@@ -355,6 +356,7 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
             "avg_clv_fair_prob_pct": 0.0,
             "clv_fair_se_pct": 0.0,
             "clv_fair_priced": 0,
+            "bets_with_close": 0,
             "weekly_clv_prob_pct": {},
             "clv_weeks": 0,
             "clv_positive_weeks": 0,
@@ -422,6 +424,8 @@ def compute_metrics(graded_bets, model_name, tier_name="All Picks"):
         "avg_clv_fair_prob_pct": round(avg_clv_fair_prob_pct, 2),
         "clv_fair_se_pct": round(clv_fair_se_pct, 2),
         "clv_fair_priced": clv_fair_priced,
+        # Promotion rule condition 1 (>= 40 graded bets with a recorded close)
+        "bets_with_close": len(clv_evaluated),
         # Promotion rule condition 3: share of weeks with a positive Avg CLV Fair Prob
         "weekly_clv_prob_pct": {w: round(v, 2) for w, v in weekly.items()},
         "clv_weeks": len(weekly),
@@ -441,6 +445,33 @@ def first_priced_decision(df, line_col):
     if line_col in df.columns:
         df = df[df[line_col].map(lambda v: safe_float(v) is not None)]
     return df.drop_duplicates(subset=["game_id"], keep="first")
+
+
+def shadow_open_away_odds(row):
+    """The logged away price, or None when the logger filled it with the -110 fallback.
+
+    A fallback price was never quoted, so CLV must not treat it as one (line-only CLV instead).
+    """
+    flag = str(row.get("away_fallback_used", "") or "").strip().upper()
+    if flag in {"TRUE", "1", "YES"}:
+        return None
+    return safe_float(row.get("away_odds"))
+
+
+def _first_present(*values):
+    """First value that is not None, blank or NaN (0.0 counts as present)."""
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        try:
+            if pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        return v
+    return None
 
 
 def v3_kelly_stake_map(v3_df, max_slate_exposure=10.0):
@@ -586,7 +617,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
                     game_id=gid,
                     week=bet_week(row, gid),
                     open_home_odds=safe_float(row.get("home_odds")),
-                    open_away_odds=safe_float(row.get("away_odds")),
+                    open_away_odds=shadow_open_away_odds(row),
                     **close_prices(gid),
                 )
                 v2_bets.append(g)
@@ -622,7 +653,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
                     week=bet_week(row, gid),
                     stake_units=v3_stakes.get(gid),
                     open_home_odds=safe_float(row.get("home_odds")),
-                    open_away_odds=safe_float(row.get("away_odds")),
+                    open_away_odds=shadow_open_away_odds(row),
                     **close_prices(gid),
                 )
 
@@ -661,7 +692,7 @@ def evaluate_all_models(master_df, v2_df, v3_df, scores, v4_df=None, regime=None
                     week=bet_week(row, gid),
                     stake_units=safe_float(row.get("v4_stake_units")),
                     open_home_odds=safe_float(row.get("home_odds")),
-                    open_away_odds=safe_float(row.get("away_odds")),
+                    open_away_odds=shadow_open_away_odds(row),
                     **close_prices(gid),
                 )
 
@@ -804,7 +835,7 @@ def _raw_lean_games(df, master_by_gid):
         if side not in {"HOME", "AWAY"} or home_line is None:
             continue
         m = master_by_gid.get(str(row.get("game_id", "")).strip())
-        h_odds, a_odds = safe_float(row.get("home_odds")), safe_float(row.get("away_odds"))
+        h_odds, a_odds = safe_float(row.get("home_odds")), shadow_open_away_odds(row)
         lean = lean_ticket_clv(side, home_line, h_odds, a_odds, m)
         if lean is None:
             continue
@@ -953,7 +984,15 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
 
     now_utc = datetime.now(pytz.utc)
 
-    # Group records by game_id
+    # One record per game, the same one grading uses (first priced decision), not the last row
+    if not master_df.empty and "game_id" in master_df.columns:
+        master_df = master_df.drop_duplicates(subset=["game_id"], keep="first")
+    if not v2_df.empty and "game_id" in v2_df.columns:
+        v2_df = v2_df.drop_duplicates(subset=["game_id"], keep="first")
+    v3_df = first_priced_decision(v3_df, "v3_best_line")
+    if v4_df is not None:
+        v4_df = first_priced_decision(v4_df, "v4_best_line")
+
     m_dict = {str(r.get("game_id", "")).strip(): r for _, r in master_df.iterrows()} if not master_df.empty else {}
     v2_dict = {str(r.get("game_id", "")).strip(): r for _, r in v2_df.iterrows()} if not v2_df.empty else {}
     v3_dict = {str(r.get("game_id", "")).strip(): r for _, r in v3_df.iterrows()} if not v3_df.empty else {}
@@ -972,7 +1011,7 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
         r2 = v2_dict.get(gid, {})
         rm = m_dict.get(gid, {})
 
-        w = safe_int(r4.get("week") or r3.get("week") or rm.get("week") or r2.get("week"), 8)
+        w = safe_int(_first_present(r4.get("week"), r3.get("week"), rm.get("week"), r2.get("week")))
 
         v3_dec = str(r3.get("v3_decision", "")).strip().upper()
         if v3_dec in {"SHADOW_PICK", "HIGH_CONVICTION"}:
@@ -1010,16 +1049,16 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
         r2 = v2_dict.get(gid, {})
         rm = m_dict.get(gid, {})
 
-        ko_raw = r4.get("kickoff_utc") or r3.get("kickoff_utc") or rm.get("kickoff_time") or r2.get("kickoff_utc")
+        ko_raw = _first_present(r4.get("kickoff_utc"), r3.get("kickoff_utc"), rm.get("kickoff_time"), r2.get("kickoff_utc"))
         ko = pd.to_datetime(ko_raw, utc=True, errors="coerce")
 
-        week = safe_int(r4.get("week") or r3.get("week") or rm.get("week") or r2.get("week"), 8)
+        week = safe_int(_first_present(r4.get("week"), r3.get("week"), rm.get("week"), r2.get("week")))
         matchup = str(r4.get("matchup") or r3.get("matchup") or rm.get("matchup") or f"{rm.get('away_team','')} @ {rm.get('home_team','')}").strip()
         if not matchup or matchup == "@":
             continue
 
-        h_line = safe_float(r4.get("home_line") or r3.get("home_line") or rm.get("opening_line") or r2.get("home_line"))
-        h_odds = safe_float(r4.get("home_odds") or r3.get("home_odds") or rm.get("opening_odds") or r2.get("home_odds"))
+        h_line = safe_float(_first_present(r4.get("home_line"), r3.get("home_line"), rm.get("opening_line"), r2.get("home_line")))
+        h_odds = safe_float(_first_present(r4.get("home_odds"), r3.get("home_odds"), rm.get("opening_odds"), r2.get("home_odds")))
 
         # v1 Pick
         v1_team = str(rm.get("pick_team", "")).strip().upper()
@@ -1095,7 +1134,7 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
                 consensus = "DISAGREEMENT"
 
         slate_rows.append({
-            "week": week,
+            "week": week if week is not None else "",
             "matchup": matchup,
             "kickoff_utc": str(ko) if pd.notna(ko) else "",
             "market_home_line": f"{h_line:+.1f}" if h_line is not None else "-",
@@ -1110,6 +1149,19 @@ def build_head_to_head_slate(master_df, v2_df, v3_df, v4_df=None):
         })
 
     return pd.DataFrame(slate_rows)
+
+
+def active_slate(slate_df):
+    """Upcoming games of the current decision week only (not every future game to week 18)."""
+    if slate_df is None or slate_df.empty:
+        return slate_df
+    future = slate_df[slate_df["is_future"]]
+    if future.empty:
+        return slate_df.tail(16).copy()
+    week = current_decision_week(zip(future["week"], future["kickoff_utc"]), datetime.now(pytz.utc))
+    if week is None:
+        return future.copy()
+    return future[pd.to_numeric(future["week"], errors="coerce") == week].copy()
 
 
 def weekly_clv_table(summary_rows):
@@ -1174,9 +1226,7 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=None)
 
     # Active week slate
     if not slate_df.empty:
-        future_slate = slate_df[slate_df["is_future"]].copy()
-        if future_slate.empty:
-            future_slate = slate_df.tail(16).copy()
+        future_slate = active_slate(slate_df)
 
         print("\n" + "=" * 115)
         print("                        ACTIVE SLATE HEAD-TO-HEAD PICKS MATRIX                             ")
@@ -1188,7 +1238,7 @@ def print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=None)
         print("=" * 115 + "\n")
 
 
-def publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=None):
+def publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=None, raw_lean=None):
     """Appends Markdown dashboard to GitHub Actions Step Summary if running in CI."""
     summary_path = os.getenv("GITHUB_STEP_SUMMARY")
     if not summary_path:
@@ -1218,14 +1268,32 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=None):
         md_lines.append("\n### Legacy (excluded from promotion)\n")
         md_table(*legacy)
 
+    def md_grid(table_rows):
+        if not table_rows:
+            return
+        width = max(len(r) for r in table_rows)
+        head = list(table_rows[0]) + [""] * (width - len(table_rows[0]))
+        md_lines.append("| " + " | ".join(str(c) for c in head) + " |")
+        md_lines.append("|" + " :---: |" * width)
+        for r in table_rows[1:]:
+            r = list(r) + [""] * (width - len(r))
+            md_lines.append("| " + " | ".join(str(c) for c in r) + " |")
+
+    w_header, w_rows = weekly_clv_table(summary_rows)
+    md_lines.append("\n### Weekly Avg CLV Fair Prob (promotion rule: positive in >= 60% of weeks bet)\n")
+    md_grid([w_header] + w_rows)
+
+    if raw_lean is not None:
+        md_lines.append("\n### Raw lean CLV (in-week)\n")
+        md_lines.append(raw_lean_test_status(raw_lean.get(IN_WEEK, [])) + "\n")
+        md_grid(raw_lean_table(raw_lean.get(IN_WEEK, [])))
+
     md_lines.append("\n### 📋 Active Slate Head-to-Head Comparison\n")
     md_lines.append("| Matchup | Market Spread | v1 Baseline | v2 Elo/Rest | v3 EPA-Enhanced | v4 Full Matrix | Consensus |")
     md_lines.append("| :--- | :---: | :---: | :---: | :--- | :--- | :---: |")
 
     if not slate_df.empty:
-        future_slate = slate_df[slate_df["is_future"]].copy()
-        if future_slate.empty:
-            future_slate = slate_df.tail(16).copy()
+        future_slate = active_slate(slate_df)
 
         for _, r in future_slate.iterrows():
             v4_p = r.get("v4_pick", "-")
@@ -1243,7 +1311,7 @@ def publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=None):
 SCORECARD_HEADER = (
     "Model", "Tier", "Bets", "Record", "Win %", "Net Units", "ROI %", "CLV Beat %",
     "CLV Tie %", "Avg CLV Pts", "Avg CLV Win Prob", "Kelly Units", "Kelly ROI %",
-    "CLV Lose %", "Avg CLV Fair Prob", "Avg CLV Fair Prob SE",
+    "CLV Lose %", "Avg CLV Fair Prob", "Avg CLV Fair Prob SE", "Bets w/ Close",
 )
 
 
@@ -1267,6 +1335,7 @@ def _sheet_summary_block(summary_rows, guard_metrics):
             f"{r.get('clv_lose_pct', 0.0):.1f}%",
             f"{r.get('avg_clv_fair_prob_pct', 0.0):+.2f}%",
             f"{r.get('clv_fair_se_pct', 0.0):.2f}%",
+            r.get("bets_with_close", 0),
         ])
 
     g_bets = guard_metrics["bets"]
@@ -1282,6 +1351,15 @@ def _sheet_summary_block(summary_rows, guard_metrics):
             f"Saved: {saved:+.2f}u",
         ] + ["-"] * (len(SCORECARD_HEADER) - 7))
     return rows
+
+
+def scorecard_grid(rows, old_rows=0, old_cols=0):
+    """Rows padded to a rectangle that also covers the tab's previous extent with blanks."""
+    width = max([len(r) for r in rows] + [old_cols, 1])
+    height = max(len(rows), old_rows)
+    grid = [list(r) + [""] * (width - len(r)) for r in rows]
+    grid += [[""] * width for _ in range(height - len(grid))]
+    return grid
 
 
 def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=None, raw_lean=None):
@@ -1326,9 +1404,7 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=N
     rows.append(["Week", "Matchup", "Kickoff (UTC)", "Market Spread", "v1 Baseline", "v2 Elo/Rest", "v3 EPA-Enhanced", "v4 Full Matrix", "Consensus"])
 
     if not slate_df.empty:
-        future_slate = slate_df[slate_df["is_future"]].copy()
-        if future_slate.empty:
-            future_slate = slate_df.tail(16).copy()
+        future_slate = active_slate(slate_df)
 
         for _, r in future_slate.iterrows():
             rows.append([
@@ -1359,8 +1435,12 @@ def write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=N
     for attempt in range(1, max_retries + 1):
         try:
             ws = get_or_create_worksheet(SCORECARD_TAB)
-            ws.clear()
-            ws.update(values=rows, range_name="A1")
+            grid = scorecard_grid(rows, ws.row_count, ws.col_count)
+            if len(grid) > ws.row_count or len(grid[0]) > ws.col_count:
+                ws.resize(rows=max(len(grid), ws.row_count), cols=max(len(grid[0]), ws.col_count))
+            # One write that overwrites every old cell with a value or a blank: no clear(), so
+            # a failed write leaves the previous scorecard instead of an empty tab.
+            ws.update(values=grid, range_name="A1")
             print(f"Successfully updated '{SCORECARD_TAB}' tab in Google Sheets.")
             break
         except (Exception, SystemExit) as exc:
@@ -1497,7 +1577,7 @@ def main():
     # 5. Output to Console, GitHub Actions, and Google Sheets
     print_terminal_dashboard(summary_rows, guard_metrics, slate_df, legacy=legacy)
     print_raw_lean_tables(raw_lean)
-    publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=legacy)
+    publish_github_summary(summary_rows, guard_metrics, slate_df, legacy=legacy, raw_lean=raw_lean)
 
     if has_creds and not args.test:
         write_google_sheet_scorecard(summary_rows, guard_metrics, slate_df, legacy=legacy, raw_lean=raw_lean)

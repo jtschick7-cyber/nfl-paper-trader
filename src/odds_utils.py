@@ -581,3 +581,20 @@ def find_cached_pregame_closing_spread(
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
+
+
+def match_event_rows(spreads, home, away, kickoff=None, max_days=5):
+    """Odds rows for home/away, nearest kickoff first, within max_days of `kickoff` (P1-3).
+
+    Team pair alone can match a division rematch two weeks later. Without a kickoff or a
+    commence_time column it falls back to the team-pair match.
+    """
+    if spreads is None or spreads.empty:
+        return pd.DataFrame()
+    match = spreads[(spreads["home_team"] == home) & (spreads["away_team"] == away)]
+    if match.empty or kickoff is None or pd.isna(kickoff) or "commence_time" not in match.columns:
+        return match
+    ko = pd.to_datetime(kickoff, utc=True)
+    gap = (pd.to_datetime(match["commence_time"], utc=True, errors="coerce") - ko).abs()
+    keep = gap <= pd.Timedelta(days=max_days)
+    return match[keep].assign(_gap=gap[keep]).sort_values("_gap").drop(columns="_gap")

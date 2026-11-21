@@ -17,7 +17,6 @@ Evaluates upcoming games using:
 
 import math
 import os
-import time
 from datetime import datetime
 import joblib
 import numpy as np
@@ -42,7 +41,7 @@ from src.odds_utils import (
 from src.artifacts import artifact_id as build_artifact_id
 import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
-from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
+from src.sheet_utils import append_rows_safely, ensure_tab_headers, get_sheet_as_df, retry_api_call
 from src.staking import cap_slate_stakes, compute_push_aware_stake
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.train_model_v4 import (
@@ -150,7 +149,11 @@ def ensure_headers(ws):
 
 def shadow_decision(best_edge, recommendation):
     """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
-    if best_edge < MIN_EDGE_THRESHOLD:
+    try:
+        best_edge = float(best_edge)
+    except (TypeError, ValueError):
+        return "PASS"
+    if not math.isfinite(best_edge) or best_edge < MIN_EDGE_THRESHOLD:
         return "PASS"
     if recommendation == "SUPPRESS":
         return "SUPPRESS_DANGER"
@@ -243,19 +246,12 @@ def ensure_feature_caches_are_current():
 
     if not need_build:
         try:
+            from src.build_features import missing_completed_game_ids
             epa_df = pd.read_csv(EPA_DATA_PATH)
             curr_epa = epa_df[epa_df["season"] == SEASON]
-            max_epa_week = int(curr_epa["week"].max()) if not curr_epa.empty else 0
-
-            sched = _load_sched([SEASON])
-            completed = sched.dropna(subset=["home_score", "away_score"])
-            max_sched_week = int(completed["week"].max()) if not completed.empty else 0
-
-            if max_sched_week > max_epa_week:
-                # Check if feature cache was created or updated recently (< 6 hours)
-                mtime = os.path.getmtime(EPA_DATA_PATH)
-                if time.time() - mtime > 6 * 3600:
-                    need_build = True
+            # No file-age gate: a git checkout gives the tracked CSV a fresh mtime (P0-3).
+            if missing_completed_game_ids(curr_epa["game_id"].astype(str), SEASON):
+                need_build = True
         except Exception as e:
             print(f"Warning checking feature caches freshness: {e}")
 
@@ -319,25 +315,22 @@ def run_v4_shadow_evaluations():
         return
     print("Decision week: " + str(decision_week))
 
-    # Connect to Google Sheets if credentials are present
-    has_creds = bool(os.getenv("GSHEET_CREDENTIALS") and os.getenv("SPREADSHEET_ID"))
-    ws = None
-    records = []
+    # Credentials were checked above. If the existing rows cannot be read, stop: appending
+    # without the dedup keys would write duplicate rows (P1-7).
     existing_keys = set()
-    if has_creds:
-        try:
-            ws = get_or_create_worksheet(SHADOW_TAB)
-            ensure_headers(ws)
-            records = ws.get_all_records()
-            for r in records:
-                key = _dedup_key(
-                    r.get("game_id", ""),
-                    r.get("home_line", ""),
-                    r.get("home_odds", ""),
-                )
-                existing_keys.add(key)
-        except Exception as exc:
-            print(f"Warning: Could not connect to Google Sheets tab {SHADOW_TAB}: {exc}")
+    try:
+        ws = get_or_create_worksheet(SHADOW_TAB)
+        ensure_headers(ws)
+        records = retry_api_call(ws.get_all_records)
+    except Exception as exc:
+        raise SystemExit(f"Could not read Google Sheets tab {SHADOW_TAB}; not appending: {exc}")
+    for r in records:
+        key = _dedup_key(
+            r.get("game_id", ""),
+            r.get("home_line", ""),
+            r.get("home_odds", ""),
+        )
+        existing_keys.add(key)
 
     # Also load local cache to avoid duplicate rows
     if os.path.exists(LOCAL_CSV_PATH):
@@ -391,7 +384,7 @@ def run_v4_shadow_evaluations():
             continue
 
         # Blank sheet cells load as NaN, which float() accepts
-        if not (math.isfinite(home_line) and math.isfinite(home_odds)):
+        if not (math.isfinite(home_line) and math.isfinite(home_odds)) or home_odds == 0:
             skipped_no_line += 1
             continue
 
@@ -422,7 +415,7 @@ def run_v4_shadow_evaluations():
         away_fallback = False
         try:
             away_odds = float(row.get("opening_away_odds"))
-            if pd.isna(away_odds):
+            if pd.isna(away_odds) or away_odds == 0:
                 away_odds = -110.0
                 away_fallback = True
         except Exception:
@@ -483,7 +476,8 @@ def run_v4_shadow_evaluations():
         }
 
         X = np.array([[feat_vals[c] for c in feature_columns]], dtype=float)
-        mu = float(ridge.predict(scaler.transform(X))[0])
+        raw_mu = float(ridge.predict(scaler.transform(X))[0])
+        mu = raw_mu
         raw_lean = raw_lean_cells(mu, home_line)  # 4 decimals, before the blend
         # Blend toward the market by beta, total-conditioned key-number probabilities,
         # calibrate, break-even edges (src/decision.py)
@@ -520,6 +514,9 @@ def run_v4_shadow_evaluations():
         best_model_prob = dec["best_model_p"]
         best_fair_prob = fair_h if best_side == "HOME" else fair_a
         best_edge = dec["best_edge"]
+        if not (math.isfinite(best_edge) and math.isfinite(best_model_prob)):
+            skipped_no_line += 1
+            continue
 
         # Push-aware Kelly sizing
         uncond_win_prob = best_model_prob * (1.0 - p_push)
@@ -534,7 +531,7 @@ def run_v4_shadow_evaluations():
             pick_side=best_side,
             open_line=home_line,
             current_line=curr_l,
-            mu_home_margin=mu,
+            mu_home_margin=raw_mu,  # the blended mu is ~market, so the 7-pt guard needs the raw margin
             edge=best_edge,
             max_auto_edge=MAX_AUTO_EDGE,
         )
@@ -661,10 +658,10 @@ def run_v4_shadow_evaluations():
             try:
                 needed_rows = len(records) + len(new_rows) + 20
                 if ws.row_count < needed_rows:
-                    ws.resize(rows=needed_rows)
+                    retry_api_call(ws.resize, rows=needed_rows)
                 if ws.col_count < len(HEADERS):
-                    ws.resize(cols=len(HEADERS))
-                ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+                    retry_api_call(ws.resize, cols=len(HEADERS))
+                append_rows_safely(ws, new_rows, value_input_option="USER_ENTERED")
                 print(f"Logged {len(new_rows)} rows to '{SHADOW_TAB}' tab in Google Sheets.")
             except Exception as exc:
                 print(f"Warning: Failed to append to Google Sheets tab {SHADOW_TAB}: {exc}")

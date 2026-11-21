@@ -6,7 +6,7 @@ import pytz
 from src.config import SEASON
 from src.decision_window import decision_guard, print_missing_results, row_is_decidable
 from src.model_utils import _load_sched
-from src.odds_utils import fetch_odds_api, parse_spreads
+from src.odds_utils import fetch_odds_api, match_event_rows, parse_spreads
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
 
 # Decision-time capture needs a fresh quote, not the 12-hour default cache.
@@ -59,8 +59,7 @@ def plan_opening_capture(sheet_df, spreads, col, schedule_df, now_utc):
         home = str(row.get("home_team", "")).strip().upper()
         away = str(row.get("away_team", "")).strip().upper()
 
-        mask = (spreads["home_team"] == home) & (spreads["away_team"] == away)
-        match = spreads[mask]
+        match = match_event_rows(spreads, home, away, kickoff)
 
         if match.empty:
             continue

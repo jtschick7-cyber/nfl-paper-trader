@@ -137,7 +137,7 @@ def audit_candidate_pick(
             flags.append(f"REVERSE_LINE_MOVEMENT: {rlm['message']}")
 
     # 3. Model vs Market discrepancy check
-    disc = check_model_discrepancy(mu_home_margin, current_line or open_line, max_diff=max_margin_diff)
+    disc = check_model_discrepancy(mu_home_margin, current_line if current_line is not None else open_line, max_diff=max_margin_diff)
     if disc:
         flags.append(f"SUSPICIOUS_OUTLIER: {disc['message']}")
 

@@ -14,7 +14,6 @@ Evaluates future games using:
 
 import math
 import os
-import time
 from datetime import datetime
 import joblib
 import numpy as np
@@ -39,7 +38,7 @@ from src.odds_utils import (
 from src.artifacts import artifact_id as build_artifact_id
 import src.decision as game_decision
 from src.raw_lean import raw_lean_cells
-from src.sheet_utils import ensure_tab_headers, get_sheet_as_df
+from src.sheet_utils import append_rows_safely, ensure_tab_headers, get_sheet_as_df, retry_api_call
 from src.train_model_v3 import ELO_HFA, ELO_INITIAL, ELO_K, ELO_REVERSION, update_elo
 from src.v2_sheet_utils import get_or_create_worksheet
 
@@ -151,7 +150,11 @@ def ensure_headers(ws):
 
 def shadow_decision(best_edge, recommendation):
     """Below MIN_EDGE_THRESHOLD the decision is PASS whatever the guard says (R2)."""
-    if best_edge < MIN_EDGE_THRESHOLD:
+    try:
+        best_edge = float(best_edge)
+    except (TypeError, ValueError):
+        return "PASS"
+    if not math.isfinite(best_edge) or best_edge < MIN_EDGE_THRESHOLD:
         return "PASS"
     if recommendation == "SUPPRESS":
         return "SUPPRESS_DANGER"
@@ -171,20 +174,15 @@ def ensure_epa_cache_is_current():
         return
 
     try:
+        from src.build_features import missing_completed_game_ids
         epa_df = pd.read_csv(EPA_DATA_PATH)
         curr_epa = epa_df[epa_df["season"] == SEASON]
-        max_epa_week = int(curr_epa["week"].max()) if not curr_epa.empty else 0
-
-        sched = _load_sched([SEASON])
-        completed = sched.dropna(subset=["home_score", "away_score"])
-        max_sched_week = int(completed["week"].max()) if not completed.empty else 0
-
-        if max_sched_week > max_epa_week:
-            mtime = os.path.getmtime(EPA_DATA_PATH)
-            if time.time() - mtime > 6 * 3600:
-                print(f"EPA data is stale (Week {max_epa_week} vs Schedule Week {max_sched_week}). Refreshing...")
-                from src.build_features import build_features
-                build_features()
+        missing = missing_completed_game_ids(curr_epa["game_id"].astype(str), SEASON)
+        # No file-age gate: a git checkout gives the tracked CSV a fresh mtime (P0-3).
+        if missing:
+            print(f"EPA data lacks {len(missing)} completed {SEASON} game(s). Refreshing...")
+            from src.build_features import build_features
+            build_features()
     except Exception as e:
         print(f"Warning checking EPA cache freshness: {e}")
 
@@ -303,7 +301,7 @@ def main():
     ensure_headers(ws)
 
     # Load existing shadow keys to avoid duplicate logging
-    records = ws.get_all_records()
+    records = retry_api_call(ws.get_all_records)
     existing_keys = set()
     for r in records:
         key = _dedup_key(
@@ -351,14 +349,14 @@ def main():
             continue
 
         # Blank sheet cells load as NaN, which float() accepts
-        if not (math.isfinite(home_line) and math.isfinite(home_odds)):
+        if not (math.isfinite(home_line) and math.isfinite(home_odds)) or home_odds == 0:
             skipped_no_line += 1
             continue
 
         away_fallback = False
         try:
             away_odds = float(row.get("opening_away_odds"))
-            if pd.isna(away_odds):
+            if pd.isna(away_odds) or away_odds == 0:
                 away_odds = -110.0
                 away_fallback = True
         except Exception:
@@ -409,7 +407,8 @@ def main():
         }
 
         X = np.array([[feat_vals[c] for c in feature_columns]], dtype=float)
-        mu = float(ridge.predict(scaler.transform(X))[0])
+        raw_mu = float(ridge.predict(scaler.transform(X))[0])
+        mu = raw_mu
         raw_lean = raw_lean_cells(mu, home_line)  # before the blend
         # Blend toward the market by beta, key-number probabilities, calibrate, break-even edges
         dec = game_decision.shadow_decision(
@@ -447,6 +446,9 @@ def main():
         best_model_p = dec["best_model_p"]
         best_fair_p = fair_h if best_side == "HOME" else fair_a
         best_edge = dec["best_edge"]
+        if not math.isfinite(best_edge):
+            skipped_no_line += 1
+            continue
 
         # Pre-bet integrity audit (with active line comparison)
         curr_line = home_line
@@ -470,7 +472,7 @@ def main():
             pick_side=best_side,
             open_line=home_line,
             current_line=curr_line,
-            mu_home_margin=mu,
+            mu_home_margin=raw_mu,  # the blended mu is ~market, so the 7-pt guard needs the raw margin
             edge=best_edge,
             max_auto_edge=MAX_AUTO_EDGE,
         )
@@ -565,12 +567,12 @@ def main():
     # Resize sheet if needed
     needed_rows = len(records) + len(new_rows) + 20
     if ws.row_count < needed_rows:
-        ws.resize(rows=needed_rows)
+        retry_api_call(ws.resize, rows=needed_rows)
 
     if ws.col_count < len(HEADERS):
-        ws.resize(cols=len(HEADERS))
+        retry_api_call(ws.resize, cols=len(HEADERS))
 
-    ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    append_rows_safely(ws, new_rows, value_input_option="USER_ENTERED")
     print(f"Wrote {len(new_rows)} evaluation rows to {SHADOW_TAB} tab.\n")
 
     for r in new_rows:
