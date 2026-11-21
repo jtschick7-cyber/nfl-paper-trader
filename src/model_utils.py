@@ -178,6 +178,7 @@ def _normalize_schedule(raw):
         "surface",
         "temp",
         "wind",
+        "location",
         "home_rest",
         "away_rest",
     ]

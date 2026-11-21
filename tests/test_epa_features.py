@@ -4,7 +4,7 @@ Unit tests for EPA feature calculations and off-season Bayesian regression.
 
 import pandas as pd
 import pytest
-from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features
+from src.epa_features import compute_rolling_epa_snapshot, get_matchup_epa_features, parse_pbp_to_game_epa
 
 
 def test_week1_offseason_epa_regression():
@@ -83,6 +83,65 @@ def test_get_matchup_epa_features():
     assert pytest.approx(matchup["diff_pass_epa"], 1e-4) == 0.10
     # diff_early_down_epa should be present
     assert "diff_early_down_epa" in matchup
+
+
+def _kc_den_snapshot():
+    return {
+        "KC": {"roll_off_pass_epa": 0.20, "roll_def_pass_epa": -0.10, "roll_off_rush_epa": 0.05,
+               "roll_def_rush_epa": -0.05, "roll_off_success_rate": 0.50, "roll_def_success_rate": 0.42,
+               "roll_off_early_down_epa": 0.12, "roll_def_early_down_epa": -0.08},
+        "DEN": {"roll_off_pass_epa": -0.05, "roll_def_pass_epa": 0.05, "roll_off_rush_epa": -0.02,
+                "roll_def_rush_epa": 0.02, "roll_off_success_rate": 0.43, "roll_def_success_rate": 0.48,
+                "roll_off_early_down_epa": -0.04, "roll_def_early_down_epa": 0.04},
+    }
+
+
+def test_fixed_matchup_has_the_right_sign():
+    m = get_matchup_epa_features(_kc_den_snapshot(), "KC", "DEN", version="fixed")
+    # (KC off - KC def) - (DEN off - DEN def) = (0.20 + 0.10) - (-0.05 - 0.05) = 0.40
+    assert m["diff_pass_epa"] == pytest.approx(0.40, abs=1e-4)
+    assert m["diff_off_pass"] == pytest.approx(0.25, abs=1e-4)
+    assert m["diff_def_pass"] == pytest.approx(0.15, abs=1e-4)
+    # Success rate was already right in the legacy formula: both versions agree
+    legacy = get_matchup_epa_features(_kc_den_snapshot(), "KC", "DEN")
+    assert m["diff_success_rate"] == pytest.approx(legacy["diff_success_rate"], abs=1e-4)
+
+
+@pytest.mark.parametrize("metric,key", [("pass_epa", "diff_pass_epa"), ("rush_epa", "diff_rush_epa"),
+                                        ("early_down_epa", "diff_early_down_epa")])
+def test_better_home_defence_raises_the_fixed_differential(metric, key):
+    snap = _kc_den_snapshot()
+    base = get_matchup_epa_features(snap, "KC", "DEN", version="fixed")[key]
+    snap["KC"][f"roll_def_{metric}"] -= 0.10  # KC allows less: a better defence
+    assert get_matchup_epa_features(snap, "KC", "DEN", version="fixed")[key] > base
+    snap = _kc_den_snapshot()
+    snap["DEN"][f"roll_def_{metric}"] -= 0.10  # the away defence improves
+    assert get_matchup_epa_features(snap, "KC", "DEN", version="fixed")[key] < base
+
+
+def test_unknown_matchup_version_raises():
+    with pytest.raises(ValueError):
+        get_matchup_epa_features(_kc_den_snapshot(), "KC", "DEN", version="nope")
+
+
+def _pbp(rows):
+    base = dict(season=2025, week=1, season_type="REG", game_id="G", posteam="KC", defteam="DEN",
+                down=1, qb_dropback=0, qb_scramble=0, success=0)
+    return pd.DataFrame([dict(base, **r) for r in rows])
+
+
+def test_dropback_split_counts_a_scramble_as_a_pass_only():
+    pbp = _pbp([
+        dict(play_type="pass", **{"pass": 1, "rush": 0}, qb_dropback=1, epa=0.2),
+        dict(play_type="run", **{"pass": 0, "rush": 1}, epa=-0.1),               # designed run
+        dict(play_type="run", **{"pass": 1, "rush": 0}, qb_dropback=1, qb_scramble=1, epa=1.0),
+    ])
+    kc = lambda df: df[df["team"] == "KC"].iloc[0]
+    legacy = kc(parse_pbp_to_game_epa(pbp))
+    fixed = kc(parse_pbp_to_game_epa(pbp, play_split="dropback"))
+    assert legacy["off_rush_epa"] == pytest.approx(0.45)  # scramble double-counted
+    assert fixed["off_rush_epa"] == pytest.approx(-0.1)
+    assert fixed["off_pass_epa"] == pytest.approx(0.6)
 
 
 def test_opponent_adjusted_epa_snapshot():

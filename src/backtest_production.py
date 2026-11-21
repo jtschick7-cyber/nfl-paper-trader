@@ -30,7 +30,14 @@ Limits:
   for decisions (they stay in training, as in production).
 - The integrity guard is not applied (it needs live injury and line-move data).
 
-Writes data/backtest_production_<model>_<anchor>_{games,seasons,calibration,probe}.csv
+Feature sets (audit Phase 2, v3 only; offline study, the live artifacts are unchanged):
+  legacy         the committed v3 features
+  sign           correct-sign EPA matchup (P0-1), same 8 features
+  sign_scramble  + scrambles counted as passes only (P0-2)
+  split          + offence and defence as separate features
+  split_neutral  + no Elo home edge at neutral sites, and a home_field feature (P1-2)
+
+Writes data/backtest_production_<model>_<anchor>[_<feature set>]_{games,seasons,calibration,probe}.csv
 (<anchor> is line, priceA or priceB). No model files, no Sheet access.
 """
 
@@ -78,6 +85,51 @@ def v3_spec():
     return ModelSpec("v3", V3_FEATURES, fit_constrained_ridge, use_total=False)
 
 
+FEATURE_SETS = ("legacy", "sign", "sign_scramble", "split", "split_neutral")
+EPA_PATHS = {"legacy": "data/team_game_epa.csv", "dropback": "data/team_game_epa_dropback.csv"}
+
+
+def feature_set_config(name):
+    """(matchup_version, play_split, neutral_sites, features) for a v3 feature set."""
+    from src.train_model_v3 import SPLIT_EPA_FEATURES, V3_FEATURES
+    split = ["elo_diff"] + SPLIT_EPA_FEATURES + ["diff_margin", "diff_rest", "division"]
+    return {
+        "legacy": ("legacy", "legacy", False, list(V3_FEATURES)),
+        "sign": ("fixed", "legacy", False, list(V3_FEATURES)),
+        "sign_scramble": ("fixed", "dropback", False, list(V3_FEATURES)),
+        "split": ("fixed", "dropback", False, split),
+        "split_neutral": ("fixed", "dropback", True, split + ["home_field"]),
+    }[name]
+
+
+def v3_feature_spec(name):
+    from src.train_model_v3 import feature_bounds, fit_constrained_ridge
+    features = feature_set_config(name)[3]
+    bounds = feature_bounds(features)
+
+    def fit(X, y, alpha=ALPHA):
+        return fit_constrained_ridge(X, y, alpha=alpha, bounds=bounds)
+
+    return ModelSpec("v3", features, fit, use_total=False)
+
+
+def load_epa(play_split):
+    """Team-game EPA. "dropback" is rebuilt from the local PBP parquet cache once."""
+    path = EPA_PATHS[play_split]
+    if play_split == "legacy" or os.path.exists(path):
+        return pd.read_csv(path)
+    import glob
+    from src.epa_features import parse_pbp_to_game_epa
+    files = sorted(glob.glob("data/epa_cache/pbp_*.parquet"))
+    if not files:
+        raise SystemExit("No PBP parquets in data/epa_cache; run src.build_features first.")
+    parts = [parse_pbp_to_game_epa(pd.read_parquet(f), play_split=play_split) for f in files]
+    epa = pd.concat(parts, ignore_index=True)
+    epa.to_csv(path, index=False)
+    print(f"Built {path} from {len(files)} PBP seasons")
+    return epa
+
+
 def v4_spec():
     from src.train_model_v4 import V4_FEATURES, fit_constrained_ridge
     return ModelSpec("v4", V4_FEATURES, fit_constrained_ridge, use_total=True)
@@ -108,6 +160,7 @@ def fit_fold(train, spec, alpha=ALPHA, n_splits=N_SPLITS, anchor="line", variant
 
     oos = train.iloc[oos_idx].copy()
     oos["oos_mu"] = oos_mu
+    oos = oos[oos["home_line"].notna()]  # a missing line is not a pick'em (P1-4)
     if anchor == "price":
         fit = fit_price_anchor(oos, variant=variant, use_total=spec.use_total)
         evidence = fit["evidence"]
@@ -392,12 +445,13 @@ def print_report(model, seasons, calib, probe, games, label=""):
         print("  price of each real bet (odds: count): " + ", ".join(f"{o:+d}: {c}" for o, c in tally.items()))
 
 
-def load_dataset(model):
+def load_dataset(model, feature_set="legacy"):
     """Builds the 2012-2025 dataset and attaches the nflverse market columns by game_id."""
     from src.model_utils import _load_sched
 
     seasons = list(range(FIRST_SEASON, LAST_SEASON + 1))
-    epa = pd.read_csv("data/team_game_epa.csv")
+    matchup_version, play_split, neutral_sites, _ = feature_set_config(feature_set)
+    epa = load_epa(play_split)
     if model == "v4":
         from src.train_model_v4 import build_v4_training_dataset
         sched = _load_sched(list(range(FIRST_SEASON - 2, LAST_SEASON + 1)))
@@ -406,7 +460,8 @@ def load_dataset(model):
     else:
         from src.train_model_v3 import build_v3_training_dataset
         sched = _load_sched(list(range(FIRST_SEASON - 2, LAST_SEASON + 1)))
-        ds = build_v3_training_dataset(seasons, epa, sched)
+        ds = build_v3_training_dataset(seasons, epa, sched, matchup_version=matchup_version,
+                                       neutral_sites=neutral_sites)
     mkt = sched[["game_id", "spread_line", "home_spread_odds", "away_spread_odds", "total_line"]].rename(
         columns={"spread_line": "mkt_spread_line", "total_line": "mkt_total_line"})
     return ds.merge(mkt.drop_duplicates("game_id"), on="game_id", how="left")
@@ -425,14 +480,18 @@ def main():
                         help="line = pre-R5 rule; price = R5 anchor; all = line, price A and price B")
     parser.add_argument("--variant", choices=["A", "B"], default=DEFAULT_VARIANT)
     parser.add_argument("--no-total", action="store_true", help="v4 without totals-conditioned sigma")
+    parser.add_argument("--feature-set", choices=FEATURE_SETS, default="legacy",
+                        help="v3 only: audit Phase 2 feature variants (offline study)")
     args = parser.parse_args()
+    if args.model == "v4" and args.feature_set != "legacy":
+        parser.error("--feature-set is v3 only")
     warnings.filterwarnings("ignore")
 
     t0 = time.time()
-    spec = v4_spec() if args.model == "v4" else v3_spec()
+    spec = v4_spec() if args.model == "v4" else v3_feature_spec(args.feature_set)
     if args.no_total:
         spec.use_total = False
-    ds = load_dataset(args.model)
+    ds = load_dataset(args.model, args.feature_set)
     print(f"Dataset: {len(ds)} games, built in {time.time() - t0:.0f}s")
 
     runs = [("line", None), ("price", "A"), ("price", "B")] if args.anchor == "all" else [(args.anchor, args.variant)]
@@ -444,7 +503,12 @@ def main():
         calib = calibration_table(games)
         probe = probe_table(games)
         tag = run_tag(anchor, variant, spec.use_total or args.model == "v3")
+        if args.feature_set != "legacy":
+            tag = f"{tag}_{args.feature_set}"
         print_report(args.model, seasons, calib, probe, games, label=f"[{tag}] ")
+        coefs = folds[-1]["ridge"].coef_ / folds[-1]["scaler"].scale_ if folds else []
+        print("Last-fold ridge coefficients (per raw unit): "
+              + ", ".join(f"{f} {c:+.4f}" for f, c in zip(spec.features, coefs)))
         for name, df in (("games", games), ("seasons", seasons), ("calibration", calib), ("probe", probe)):
             df.to_csv(f"{OUT_PREFIX}_{args.model}_{tag}_{name}.csv", index=False)
         print(f"Wrote {OUT_PREFIX}_{args.model}_{tag}_*.csv ({time.time() - t0:.0f}s so far)")
