@@ -2,9 +2,13 @@
 
 ## Current state
 
-- **Branch:** `claude/p3-totals-kill-test` (PR open, waits for owner merge). PRs #14–#28 are merged, P1 (#26) and P2 (#27) included.
+- **Branch:** `claude/amazing-johnson-kfhn3v` (docs fix). PRs #14–#30 are merged: P1 (#26), P2 (#27), P4 spec (#29) and P3 (#30) included.
 - **Last task:** P3 totals kill test (`notes/p3-totals-kill-test.md`): **KILL**. Bottom-up totals are closed; top-down totals (P2) are unaffected.
-- **Next task:** owner redeploys the Worker for P1 (merged) (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); also re-run `src.topdown_v2` weekly (frozen P2 gate on the evaluation sample, from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24; descriptive only, never stop early for a pass); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
+- **Next task:** build P4 (`notes/implementation-plan/P4-prop-scanner.md`, rules frozen; branch `claude/p4-prop-scanner`). Then the P1 live check after the first Friday and Sunday (P1 spec "Live check").
+- **Owner decisions (2026-11-24):** (a) yes: after the Wed 11-25 GB @ LA captures are checked, replace `williamhill_us` with `espnbet` unless it posted props, and `betus`/`mybookieag` with `fanatics`/`hardrockbet`, before Fri 11-27 21:00 UTC; (b) yes: add ~3 mid-week game-odds snapshots a week for P2's gate (~6 credits a week); (c) no: no historical prop odds are bought, so P5's market test (Stage B) uses only the 2026 archive. P5 spec written (`notes/implementation-plan/P5-receptions-model.md`, rules frozen); P5a (Stage A) is built after P4.
+- **Weekly re-runs:** `src.topdown_replay` (pre-registered Phase 3 test; 34 of 100 flagged offers, 17 of 40 played games on 11-24) and `src.topdown_v2` (frozen P2 gate on the evaluation sample from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24); add `src.props.topdown_props` once P4 is built. Descriptive only, never stop early for a pass. Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Calendar:** Sat 11-28 check of the Thanksgiving/Black Friday props captures and the Friday opens; Tue 12-01 regular live check after the 15:17 UTC run.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -20,10 +24,12 @@
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
-| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
+| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); Worker redeployed, probe done (run 45488926007); live check after the first Friday and Sunday |
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
-| P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | spec written 11-24 (rules frozen), not built |
+| P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | spec merged 11-24 (PR #29, rules frozen), not built |
+| Mid-week game-odds snapshots | owner decision (b), P2 spec owner question | approved 11-24, not built |
+| P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | spec written 11-24 (rules frozen); P5a after P4, P5b only after a Stage A pass |
 
 ## Log
 
@@ -55,7 +61,7 @@
 ### 2026-11-24: P1 probe and Wednesday Worker cron
 
 - Probe run 45488926007 (GB @ LA, 1 credit, 395 left): 7 of 10 books returned `player_receptions`, all with both Over and Under except BetRivers (Over only). Pinnacle, DraftKings, FanDuel, BetOnline and Bovada had 15 players; BetMGM had 12. `williamhill_us`, `betus` and `mybookieag` returned nothing; recheck on the first real captures before replacing them.
-- Week 12 has a Wednesday game (GB @ LA, 01:00 UTC Thu) and the Worker had no Wednesday cron. Added `WED` to `30 13,17,21 * * MON,THU,FRI,SAT`, still 4 crons. The closing loop and props capture now both run on Wednesdays. Owner redeploys the Worker.
+- Week 12 has a Wednesday game (GB @ LA, 01:00 UTC Thu) and the Worker had no Wednesday cron. Added `WED` to `30 13,17,21 * * MON,THU,FRI,SAT`, still 4 crons. The closing loop and props capture now both run on Wednesdays. The owner has since redeployed the Worker (twice).
 
 ### 2026-11-24: P1 prop archive capture built
 
