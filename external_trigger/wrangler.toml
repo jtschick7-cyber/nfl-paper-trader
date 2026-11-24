@@ -15,6 +15,6 @@ GITHUB_REF = "main"
 crons = [
   "17 5 * * *",
   "17 15 * * TUE",
-  "30 13,17,21 * * MON,THU,FRI,SAT",
+  "30 13,17,21 * * MON,WED,THU,FRI,SAT",
   "30 10,15,20 * * SUN",
 ]
