@@ -2,10 +2,10 @@
 
 ## Current state
 
-- **Branch:** `claude/p4-prop-scanner` (PR #32 open, waits for owner merge). PRs #14–#31 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), and the PROGRESS refresh and P5 spec (#31).
-- **Last task:** P4 prop scanner built (`notes/p4-prop-scanner.md`). First run: the archive held only P1's probe (excluded), so the evaluation is empty and the gate is pending (0 of 150 offers, 0 of 30 games).
+- **Branch:** `claude/p5a-receptions-stage-a` (PR open, waits for owner merge). PRs #14–#32 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), the PROGRESS refresh and P5 spec (#31), and P4 (#32).
+- **Last task:** P5a Stage A ran once: **FAIL** (`notes/p5a-receptions-stage-a.md`). Δ LL_sum −0.0430 ± 0.0050 (−8.7 SE), negative in all 6 gate seasons and in the injury subset, but 15 of 29 tested calibration bins miss. Step 5 is closed: no P5b, no live logging.
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
-- **Next task:** P5a (Stage A of `notes/implementation-plan/P5-receptions-model.md`, rules frozen; branch `claude/p5a-receptions-stage-a`). Also the P1 live check after the first Friday and Sunday (P1 spec "Live check").
+- **Next task:** Step 5 is closed (P5a FAIL), so there is no P5b. Next is the P1 live check after the first Friday and Sunday (P1 spec "Live check"), and the owner's next roadmap item.
 - **Owner decisions (2026-11-24):** (a) yes: after the Wed 11-25 GB @ LA captures are checked, replace `williamhill_us` with `espnbet` unless it posted props, and `betus`/`mybookieag` with `fanatics`/`hardrockbet`, before Fri 11-27 21:00 UTC; (b) yes: add ~3 mid-week game-odds snapshots a week for P2's gate (~6 credits a week); (c) no: no historical prop odds are bought, so P5's market test (Stage B) uses only the 2026 archive.
 - **Weekly re-runs:** `src.topdown_replay` (pre-registered Phase 3 test; 34 of 100 flagged offers, 17 of 40 played games on 11-24), `src.topdown_v2` (frozen P2 gate on the evaluation sample from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24) and `src.props.topdown_props` after `git fetch origin odds-data` (frozen P4 gate; 0 of 150 offers, 0 of 30 games on 11-24). Descriptive only, never stop early for a pass. Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Calendar:** Sat 11-28 check of the Thanksgiving/Black Friday props captures and the Friday opens; Tue 12-01 regular live check after the 15:17 UTC run.
@@ -29,9 +29,23 @@
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
 | P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | built 11-24 (`notes/p4-prop-scanner.md`); weekly re-run, gate pending |
 | Mid-week game-odds snapshots | owner decision (b), P2 spec owner question | approved 11-24, not built |
-| P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | spec written 11-24 (rules frozen); P5a after P4, P5b only after a Stage A pass |
+| P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | P5a done 11-24: Stage A **FAIL** on calibration (`notes/p5a-receptions-stage-a.md`); Step 5 closed, no P5b |
 
 ## Log
+
+### 2026-11-24: P5a receptions model, Stage A walk-forward: FAIL
+
+- New `src/props/data_sources.py` downloads and caches the nflverse `stats_player_week`, `snap_counts`, `injuries` and `players` assets and joins snaps PFR → GSIS. 204 of 241,911 REG snap rows have no match and are dropped.
+- New `src/props/features.py` builds the frozen universe and the point-in-time features: role windows (8/4 games across seasons), game script, injury report shares, `qb_out`, team pace and opponent windows. `depth_rank` uses an as-of-kickoff roster, never realised participation.
+- New `src/props/train_receptions.py`: StandardScaler + PoissonRegressor, alpha by forward inner season splits, NB r per position group by ML on [1, 200] from out-of-fold means, and a 0..14 PMF with the ≥ 15 tail lumped. New `src/props/backtest_receptions.py` holds the metrics, calibration, gate and report.
+- The tests were committed (`9342779`) before the code, and the code (`03bcb5e`) before the single run. Builder choices where the spec is silent are listed in the note.
+- Owner decision before the run, from the spec text only: test season 2018 has no inner fold under the frozen alpha rule, so it is **skipped**. The gate seasons are unaffected and no constant changed.
+- Universe: 28,404 player-games for 2016–2025; 20,579 are scored (2019–2025), 17,761 of them in the gate seasons.
+- Result, pooled 2020–2025: Δ LL_sum −0.0430 ± 0.0050 (−8.67 SE), injury subset −0.0571, Δ < 0 in 6 of 6 seasons. Full log loss Δ −0.0248 and CRPS Δ −0.0272 point the same way.
+- Calibration fails. 15 of the 29 bins with n ≥ 500 miss the 2-SE band, mostly with observed over-rates above the model's P(over). Verdict: **FAIL**. Step 5 stops, and `receptions_vs_market.py` was not built.
+- Data: `games.csv` came from `nflverse/nfldata` on GitHub, because `nfl_data_py`'s schedule host does not resolve here. PBP 2016–2025 was filled by `src.build_features`, and its rewrite of the tracked `data/team_game_*.csv` was reverted. `.gitignore`: added `data/receptions_stage_a.csv`.
+- `models/`, the workflows, the Worker, `src/config.py`, `src/totals/*` and the other listed modules were not edited. No Odds API call and no Sheet write.
+- Tests: true iff `pytest tests/ -q` reports 1792 passed (36 new, after P4's 1756) and the Worker tests report 10 passed.
 
 ### 2026-11-24: P4 top-down player_receptions scanner built
 
