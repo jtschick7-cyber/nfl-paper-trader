@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `claude/p3-totals-kill-test` (PR open, waits for owner merge). PRs #14–#28 are merged, P1 (#26) and P2 (#27) included.
-- **Last task:** P3 totals kill test (`notes/p3-totals-kill-test.md`): **KILL**. Bottom-up totals are closed; top-down totals (P2) are unaffected.
-- **Next task:** owner redeploys the Worker for P1 (merged) (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); also re-run `src.topdown_v2` weekly (frozen P2 gate on the evaluation sample, from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24; descriptive only, never stop early for a pass); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Branch:** `claude/p4-prop-scanner` (PR open, waits for owner merge). PRs #14–#30 are merged, P1 (#26), P2 (#27), the P4 spec (#29) and P3 (#30) included.
+- **Last task:** P4 prop scanner built (`notes/p4-prop-scanner.md`). First run: the archive held only P1's probe (excluded), so the evaluation is empty and the gate is pending (0 of 150 offers, 0 of 30 games).
+- **Next task:** owner redeploys the Worker for P1 (merged) (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); also re-run `src.topdown_v2` weekly (frozen P2 gate on the evaluation sample, from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24; descriptive only, never stop early for a pass); also re-run `src.props.topdown_props` weekly after `git fetch origin odds-data` (frozen P4 gate; 0 of 150 offers, 0 of 30 games on 11-24; descriptive only, never stop early for a pass); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -23,9 +23,22 @@
 | P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
-| P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | spec written 11-24 (rules frozen), not built |
+| P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | built 11-24 (`notes/p4-prop-scanner.md`); weekly re-run, gate pending |
 
 ## Log
+
+### 2026-11-24: P4 top-down player_receptions scanner built
+
+- New `src/props/prop_pricing.py`: `normalize_name`, `prop_quotes`, Poisson `prop_probabilities` (integer lines push), `implied_lambda` (bisection on [0.05, 20] to 1e-6), `price_prop_offer`. It also has the NB(r = 8) sensitivity. The de-vig is `total_pricing.devig_two_way`, and the EV is `key_numbers.calculate_expected_value`.
+- New `src/props/topdown_props.py`: prices every US and offshore offer in each `open` snapshot against Pinnacle's λ*, and repeats this against BetOnline (`anchor` column). It flags at EV ≥ 2% and closes against the latest `close` snapshot before kickoff. It also computes `close_ev_nb` and `close_ev_median`, plus `close_status` and the frozen gate (pass, fail, pending, or inconclusive with `--season-settled`). Probe files are ignored.
+- New `src/props/player_stats.py`: grades from the nflverse release assets `stats_player_week_2026.parquet` and `snap_counts_2026.parquet` (cached in `data/nflverse_cache/`). The join is on normalized name, team and game. Zero snaps or no snap row is VOID. Unmatched, ambiguous and snaps-without-stats players are listed and never graded.
+- Every spec constant is frozen and asserted in a test. The tests (37) were committed (`7141f0c`) before the code and before the first run.
+- Builder choices where the spec is silent are listed in the note. The main one: a book with several two-sided lines for a player is priced off the line nearest 50/50.
+- First run, archive as of ~21:50 UTC: 1 prop file, the probe, which is excluded. So 0 priced offers and the gate is pending. A smoke check with the probe relabelled in memory priced 126 offers per anchor across the 5 returning books, BetRivers' one-sided Overs included. No EVs were looked at.
+- `total_pricing`, `topdown_replay`, `market_consensus`, `topdown_v2`, the workflows, the Worker, `src/config.py` and `models/` were not edited. No Odds API call and no Sheet write.
+- `.gitignore`: added `data/topdown_props_*.csv`.
+- Tests: true iff `pytest tests/ -q` reports 1752 passed (37 new, after P3's 1715) and the Worker tests report 10 passed.
+- The weekly re-run fills the note's tables. The GB @ LA open and close files should land by ~01:30 UTC 11-26, and the Thanksgiving and Black Friday files after that.
 
 ### 2026-11-24: P3 offline totals kill test: KILL
 
