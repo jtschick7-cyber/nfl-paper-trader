@@ -51,6 +51,15 @@ with mean closing EV > 0 by at least 2 game-clustered SE. Fail: mean closing EV 
 Only after a pass: a live `TopDown_Shadow` tab and best-book vs primary-book CLV on
 `Model_Scorecard` (audit 3.1 item 1).
 
+## Re-runs
+
+- 2026-11-24, owner-approved fix: the replay now counts only games that kicked off by the
+  archive's latest snapshot. Before, unplayed games were scored against their latest snapshot, a
+  close that later snapshots could still change. The 11-21 table above included such games. The
+  pricing and flagging rules are unchanged.
+- 2026-11-24 (52 snapshots, 1–24 Nov, 47 played games): flagged 34 offers on 17 games, closing
+  EV **+3.1% ± 1.4%** (by game), 68% beat the close, 18-16. Not yet at the 100 / 40 size.
+
 ## Not done
 
 - Live `TopDown_Shadow` logging, scorecard columns, a Thursday decision snapshot: these need

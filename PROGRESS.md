@@ -4,7 +4,7 @@
 
 - **Branch:** `main`. PRs #14–#22 (R1–R5, audit Phases 1–3, P0-7) are merged; the 2026-11-24 live check is on `claude/live-check-2026-11-24`.
 - **Last task:** live check of the 2026-11-24 Tuesday run (week 12, the first in-week slate). Every check passed; see the log.
-- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 41 of 100 flagged offers, 23 of 40 games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -30,7 +30,7 @@
 - R5 pass: new rows carry `v3_2012-2025_132e614a` and `v4_2012-2025_995bf8ae`; no V3/V4 pick; one artifact in-week, so no per-artifact line yet (by design).
 - R1 pass: no week 13+ row has an opening line; all 16 week-12 rows have `opening_book`, `opening_quote_at`, `decision_regime = in_week`, and the 5 picks have `pick_made_at`. Requests remaining 432 (11-17) → 396 (11-24).
 - R2/R3 pass: the three shadow tabs end with `artifact_id`, `decision_regime`, raw-lean columns; 48 new rows, none with blank `raw_lean_side`; legacy v2 6 / v3 4 bets; guard count 3; RAW LEAN CLV sections present (in-week empty until week 12 settles).
-- Phase 3 replay: 52 snapshots, 63 events. Flagged 41 offers on 23 games, closing EV +2.40% ± 1.20% (game-clustered), 66% beat the close. Test not reached (needs 100 on 40). 7 flagged offers are unplayed week-12 games scored against the latest snapshot; played only: 34 on 17 games, +3.1% ± 1.4%.
+- Phase 3 replay: first run gave 41 flagged offers on 23 games, but 7 were unplayed week-12 games scored against the latest snapshot. Owner approved a fix: `closing_state` now skips games that kick off after the archive's latest snapshot (new test). Re-run: 47 played games, 34 flagged on 17, closing EV +3.1% ± 1.4% (game-clustered), 68% beat the close. Test not reached (needs 100 on 40).
 
 ### 2026-11-21: Audit Phase 3 consensus pricer and archive replay
 
