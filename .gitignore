@@ -27,3 +27,4 @@ data/topdown_replay_*.csv
 data/props_cache/
 data/topdown_v2_*.csv
 data/totals_backtest_games.csv
+data/topdown_props_*.csv
