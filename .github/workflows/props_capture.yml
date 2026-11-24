@@ -1,0 +1,68 @@
+name: Props Capture
+
+# Task P1: archive multi-book player_receptions odds (open and close per game) on the
+# odds-data branch under props/. Capture only; no Sheet access. The Cloudflare Worker
+# dispatches this after closing_line_monitor.yml on the two closing-loop crons; the run
+# paces itself to each game's open and close targets. The archive is the ledger, so a
+# duplicate or late run never pays twice for the same (phase, event).
+
+on:
+  schedule:
+    # Sparse backup for the Thursday (TNF) and Friday opens only; GitHub crons run late.
+    - cron: "47 16 * * 4,5"
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: "Capture the earliest upcoming event once as phase 'probe' (1 credit)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: props-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    permissions:
+      contents: write  # push prop snapshots to the odds-data branch
+
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Capture player_receptions snapshots
+        env:
+          PROBE: ${{ inputs.probe }}
+        run: |
+          if [ "$PROBE" = "true" ]; then
+            python -m src.props.capture_props --probe
+          else
+            python -m src.props.capture_props
+          fi
+
+      # Re-pushes anything the in-loop pushes missed.
+      - name: Archive prop snapshots to odds-data branch
+        if: always()
+        run: bash scripts/push_prop_snapshots.sh

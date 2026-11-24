@@ -75,6 +75,27 @@ test("runCron dispatches the mapped workflow and rejects unknown crons", async (
   await assert.rejects(runCron("0 0 * * *", env, f), /No workflows/);
 });
 
+test("closing crons dispatch the closing loop first, then props capture", async () => {
+  const closing = ["30 13,17,21 * * MON,THU,FRI,SAT", "30 10,15,20 * * SUN"];
+  for (const cron of closing) {
+    assert.deepEqual(SCHEDULE[cron], ["closing_line_monitor.yml", "props_capture.yml"], cron);
+    const f = fakeFetch([204, 204]);
+    await runCron(cron, env, f);
+    assert.deepEqual(
+      f.calls.map((c) => c.url.split("/").at(-2)),
+      ["closing_line_monitor.yml", "props_capture.yml"],
+    );
+  }
+  // A failed closing-loop dispatch stops the cron before props capture is tried.
+  const f = fakeFetch([401]);
+  await assert.rejects(runCron(closing[1], env, f), /401/);
+  assert.equal(f.calls.length, 1);
+});
+
+test("cron count stays at four (free plan allows five per Worker)", () => {
+  assert.equal(Object.keys(SCHEDULE).length, 4);
+});
+
 test("day-of-week fields use names, not numbers", () => {
   // Cloudflare numbers weekdays 1=Sunday..7=Saturday and rejects 0, unlike
   // GitHub/Unix cron (0=Sunday). Names mean the same thing on both.

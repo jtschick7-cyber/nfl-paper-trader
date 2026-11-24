@@ -14,6 +14,14 @@ Written 2026-11-13 at `main` = `99dae0c`. The reasoning and evidence are in [`FA
 
 One task per session, one branch and PR per task (`claude/r1-decision-timing`, and so on).
 
+### Next phase (owner's roadmap brief, 2026-11-24)
+
+| Task | Spec | Effort | Depends on | Touches live picks? |
+|---|---|---|---|---|
+| P1 | [P1-props-capture.md](P1-props-capture.md) | M | none | No, archive only (deadline in spec) |
+
+Later steps (prop pricer and top-down prop scanner, totals kill test, top-down v2, bottom-up receptions model) get specs once P1 is capturing.
+
 **R1 has a deadline.** The Tuesday workflow captures next week's look-ahead openers every time it runs. If R1 is live before **Tue 2026-11-17 15:17 UTC**, week 12 is the first clean week with no migration. After that, run the migration step in the R1 spec.
 
 ## Decisions already taken
