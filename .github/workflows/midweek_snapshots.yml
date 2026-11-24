@@ -1,0 +1,55 @@
+name: Midweek Game-Odds Snapshot
+
+# Owner-approved 2026-11-24 (P2 owner question): one extra full-slate game-odds snapshot on
+# Wed/Thu/Sat from 17:30 UTC, about 2 credits each, so the P2 gate can fill this season.
+# The Cloudflare Worker dispatches this on every Mon/Wed-Sat 13:30/17:30/21:30 wake; the job
+# gates itself (Wed/Thu/Sat, at or after 17:25 UTC, at most one snapshot a day, odds-data
+# ledger checked before any paid call). Same request as the existing game-odds calls. No Sheet access.
+
+on:
+  schedule:
+    # Backup only; GitHub crons run late, and a late run still self-gates.
+    - cron: "47 17 * * 3,4,6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: midweek-snapshots
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # push the snapshot to the odds-data branch
+
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Take mid-week game-odds snapshot
+        run: python -m src.midweek_snapshot
+
+      # Runs even when the snapshot step failed, so a written file is never left unpushed.
+      - name: Archive snapshot to odds-data branch
+        if: always()
+        env:
+          SNAP_DIR: data/midweek_cache/snapshots
+        run: bash scripts/push_odds_snapshots.sh

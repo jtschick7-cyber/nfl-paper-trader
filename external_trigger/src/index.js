@@ -18,8 +18,14 @@ export const SCHEDULE = {
   // 13:30 and 17:30 starts only matter for afternoon games (Thanksgiving,
   // Christmas, Saturdays late in the season). Props capture (task P1) rides on
   // the same crons and paces itself to its own open/close targets; it is listed
-  // second because runCron stops at the first failed dispatch.
-  "30 13,17,21 * * MON,WED,THU,FRI,SAT": ["closing_line_monitor.yml", "props_capture.yml"],
+  // second because runCron stops at the first failed dispatch. The mid-week
+  // game-odds snapshot (P2) rides last and gates itself to one call on
+  // Wed/Thu/Sat from the 17:30 wake; on the other wakes it exits at once.
+  "30 13,17,21 * * MON,WED,THU,FRI,SAT": [
+    "closing_line_monitor.yml",
+    "props_capture.yml",
+    "midweek_snapshots.yml",
+  ],
   // Sunday closing loop: London games, 1pm/4pm ET slates, then SNF.
   "30 10,15,20 * * SUN": ["closing_line_monitor.yml", "props_capture.yml"],
 };

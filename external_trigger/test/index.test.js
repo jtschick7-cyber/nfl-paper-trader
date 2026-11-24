@@ -76,20 +76,29 @@ test("runCron dispatches the mapped workflow and rejects unknown crons", async (
 });
 
 test("closing crons dispatch the closing loop first, then props capture", async () => {
-  const closing = ["30 13,17,21 * * MON,WED,THU,FRI,SAT", "30 10,15,20 * * SUN"];
-  for (const cron of closing) {
-    assert.deepEqual(SCHEDULE[cron], ["closing_line_monitor.yml", "props_capture.yml"], cron);
-    const f = fakeFetch([204, 204]);
+  const expected = {
+    "30 13,17,21 * * MON,WED,THU,FRI,SAT": ["closing_line_monitor.yml", "props_capture.yml", "midweek_snapshots.yml"],
+    "30 10,15,20 * * SUN": ["closing_line_monitor.yml", "props_capture.yml"],
+  };
+  for (const [cron, wfs] of Object.entries(expected)) {
+    assert.deepEqual(SCHEDULE[cron], wfs, cron);
+    const f = fakeFetch(wfs.map(() => 204));
     await runCron(cron, env, f);
-    assert.deepEqual(
-      f.calls.map((c) => c.url.split("/").at(-2)),
-      ["closing_line_monitor.yml", "props_capture.yml"],
-    );
+    assert.deepEqual(f.calls.map((c) => c.url.split("/").at(-2)), wfs);
   }
   // A failed closing-loop dispatch stops the cron before props capture is tried.
   const f = fakeFetch([401]);
-  await assert.rejects(runCron(closing[1], env, f), /401/);
+  await assert.rejects(runCron("30 10,15,20 * * SUN", env, f), /401/);
   assert.equal(f.calls.length, 1);
+});
+
+test("mid-week snapshot rides only the weekday closing cron, which covers its 17:30 wake", () => {
+  const crons = Object.entries(SCHEDULE).filter(([, wfs]) => wfs.includes("midweek_snapshots.yml"));
+  assert.equal(crons.length, 1);
+  const [min, hours, , , days] = crons[0][0].split(/\s+/);
+  assert.equal(min, "30");
+  assert.ok(hours.split(",").includes("17"));
+  for (const d of ["WED", "THU", "SAT"]) assert.ok(days.split(",").includes(d), d);
 });
 
 test("cron count stays at four (free plan allows five per Worker)", () => {
