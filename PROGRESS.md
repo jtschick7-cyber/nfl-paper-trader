@@ -32,12 +32,13 @@
 - New `src/props/prop_pricing.py`: `normalize_name`, `prop_quotes`, Poisson `prop_probabilities` (integer lines push), `implied_lambda` (bisection on [0.05, 20] to 1e-6), `price_prop_offer`. It also has the NB(r = 8) sensitivity. The de-vig is `total_pricing.devig_two_way`, and the EV is `key_numbers.calculate_expected_value`.
 - New `src/props/topdown_props.py`: prices every US and offshore offer in each `open` snapshot against Pinnacle's λ*, and repeats this against BetOnline (`anchor` column). It flags at EV ≥ 2% and closes against the latest `close` snapshot before kickoff. It also computes `close_ev_nb` and `close_ev_median`, plus `close_status` and the frozen gate (pass, fail, pending, or inconclusive with `--season-settled`). Probe files are ignored.
 - New `src/props/player_stats.py`: grades from the nflverse release assets `stats_player_week_2026.parquet` and `snap_counts_2026.parquet` (cached in `data/nflverse_cache/`). The join is on normalized name, team and game. Zero snaps or no snap row is VOID. Unmatched, ambiguous and snaps-without-stats players are listed and never graded.
-- Every spec constant is frozen and asserted in a test. The tests (37) were committed (`7141f0c`) before the code and before the first run.
-- Builder choices where the spec is silent are listed in the note. The main one: a book with several two-sided lines for a player is priced off the line nearest 50/50.
+- Every spec constant is frozen and asserted in a test. The first 37 tests were committed (`7141f0c`) before the code and before the first run.
+- Builder choices where the spec is silent are listed in the note. The main one: a book with several two-sided lines for a player is priced off the line nearest 50/50; the report counts how often that fired.
+- Owner-approved follow-up the same day, before any capture existed: a player with snaps but no stats row is graded as 0 catches when the name is seen for that team elsewhere in the season, otherwise listed. The report also lists games still pending 3+ days after kickoff.
 - First run, archive as of ~21:50 UTC: 1 prop file, the probe, which is excluded. So 0 priced offers and the gate is pending. A smoke check with the probe relabelled in memory priced 126 offers per anchor across the 5 returning books, BetRivers' one-sided Overs included. No EVs were looked at.
 - `total_pricing`, `topdown_replay`, `market_consensus`, `topdown_v2`, the workflows, the Worker, `src/config.py` and `models/` were not edited. No Odds API call and no Sheet write.
 - `.gitignore`: added `data/topdown_props_*.csv`.
-- Tests: true iff `pytest tests/ -q` reports 1752 passed (37 new, after P3's 1715) and the Worker tests report 10 passed.
+- Tests: true iff `pytest tests/ -q` reports 1756 passed (41 new, after P3's 1715) and the Worker tests report 10 passed.
 - The weekly re-run fills the note's tables. The GB @ LA open and close files should land by ~01:30 UTC 11-26, and the Thanksgiving and Black Friday files after that.
 
 ### 2026-11-24: P3 offline totals kill test: KILL

@@ -17,7 +17,10 @@ the players of both teams in that game, in the stats rows and the snap-count row
 - No player with that name: `unmatched`. Two distinct players with that name in one source, or
   the two sources disagree on the team: `ambiguous`. Both are listed and left ungraded.
 - No snap-count row, or 0 offensive snaps: VOID, 0 units, excluded from W-L.
-- Offensive snaps but no stats row: `no_stats_row`, listed and ungraded (never assumed 0).
+- Offensive snaps but no stats row for the game: nflverse player stats only hold players who
+  recorded a stat, so this is usually a real 0 catches. It is graded as 0 (`graded_zero`) when
+  the name matches exactly one stats-file player on the same team elsewhere in the season,
+  which shows the two files agree on the name. Otherwise `no_stats_row`, listed and ungraded.
 - Otherwise WIN / LOSS / PUSH at the offered line and price.
 """
 
@@ -85,7 +88,7 @@ def _game_rows(df, season, away, home):
               & df["team"].isin([home, away])]
 
 
-def _resolve(name, st, sn):
+def _resolve(name, st, sn, season_stats):
     """(status, receptions or None) for one normalized name in one game."""
     if st.empty and sn.empty:
         return "pending", None
@@ -101,7 +104,8 @@ def _resolve(name, st, sn):
     if snaps <= 0:
         return "void", None
     if s.empty:
-        return "no_stats_row", None
+        seen = season_stats[(season_stats["_n"] == name) & (season_stats["team"] == k["team"].iloc[0])]
+        return ("graded_zero", 0.0) if seen["player_id"].nunique() == 1 else ("no_stats_row", None)
     return "graded", float(s["receptions"].fillna(0).sum())
 
 
@@ -124,13 +128,14 @@ def attach_results(df, stats, snaps):
             season = _season(r.kickoff)
             st = _game_rows(stats, season, r.away_team, r.home_team)
             sn = _game_rows(snaps, season, r.away_team, r.home_team)
-            cache[key] = _resolve(r.player, st, sn)
+            season_stats = stats[stats["game_id"].astype(str).str.startswith(f"{season}_")] if len(stats) else stats
+            cache[key] = _resolve(r.player, st, sn, season_stats)
             if cache[key][0] in ("unmatched", "ambiguous", "no_stats_row"):
                 unresolved.append({"event_id": r.event_id, "game": f"{r.away_team} @ {r.home_team}",
                                    "player": r.player, "player_name": r.player_name, "reason": cache[key][0]})
         st_, n = cache[key]
         status.append(st_)
-        if st_ == "graded":
+        if st_ in ("graded", "graded_zero"):
             x, u = grade_offer(r.side, r.line, r.odds, n)
             rec.append(n), res.append(x), units.append(u)
         elif st_ == "void":

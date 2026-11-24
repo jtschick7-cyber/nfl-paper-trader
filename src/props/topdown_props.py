@@ -52,6 +52,7 @@ GATE_MIN_Z = 2.0
 # ---------------------------------------------------------------------------------------------
 
 OUT_PATH = "data/topdown_props_offers.csv"
+STALE_PENDING_DAYS = 3      # report only: a game still ungraded this long after kickoff is listed
 ANCHORS = (ANCHOR_BOOK, ALT_ANCHOR_BOOK)
 SIDES = ("OVER", "UNDER")
 
@@ -69,17 +70,18 @@ def book_class(book):
 
 
 def _main_line_lambdas(quotes):
-    """{(book, player): (line, lam_poisson, lam_nb)} from each book's two-sided quotes."""
-    best = {}
+    """{(book, player): (line, lam_poisson, lam_nb, n_lines)} from each book's two-sided quotes."""
+    best, n = {}, {}
     for q in quotes:
         if q["over_odds"] is None or q["under_odds"] is None:
             continue
         p, _ = devig_two_way(q["over_odds"], q["under_odds"])
         key = (q["book"], q["player"])
+        n[key] = n.get(key, 0) + 1
         rank = (abs(p - 0.5), q["line"])
         if key not in best or rank < best[key][0]:
             best[key] = (rank, q["line"], p)
-    return {k: (line, implied_lambda(line, p), implied_lambda(line, p, r=NB_SENSITIVITY_R))
+    return {k: (line, implied_lambda(line, p), implied_lambda(line, p, r=NB_SENSITIVITY_R), n[k])
             for k, (_, line, p) in best.items()}
 
 
@@ -115,7 +117,7 @@ def evaluate_open(snap, close, ignored=None):
             ignored.update(q["book"] for q in prop_quotes(close["response"]) if book_class(q["book"]) is None)
         lam_close = _main_line_lambdas(cq)
         by_player = {}
-        for (_, player), (_, lam, _) in lam_close.items():
+        for (_, player), (_, lam, _, _) in lam_close.items():
             by_player.setdefault(player, []).append(lam)
         close_median = {p: statistics.median(v) for p, v in by_player.items()}
 
@@ -132,7 +134,7 @@ def evaluate_open(snap, close, ignored=None):
             a = lam_open.get((anchor, q["player"]))
             if a is None:
                 continue
-            a_line, lam, lam_nb = a
+            a_line, lam, lam_nb, a_lines = a
             c = lam_close.get((anchor, q["player"]))
             status = "no_close_snapshot" if close is None else ("ok" if c else "anchor_missing_at_close")
             med = close_median.get(q["player"]) if c else None
@@ -147,6 +149,7 @@ def evaluate_open(snap, close, ignored=None):
                     "book": q["book"], "book_class": cls, "side": side,
                     "line": q["line"], "odds": odds, "one_sided": one_sided,
                     "anchor_line": a_line, "same_line": q["line"] == a_line,
+                    "anchor_multi_line": a_lines > 1,
                     "lam_open": lam, "ev": ev,
                     "ev_nb": price_prop_offer(lam_nb, side, q["line"], odds, r=NB_SENSITIVITY_R)[2],
                     "flagged": ev >= FLAG_EV,
@@ -164,7 +167,7 @@ def evaluate_open(snap, close, ignored=None):
 
 
 COLUMNS = ["event_id", "kickoff", "home_team", "away_team", "anchor", "player", "player_name", "book",
-           "book_class", "side", "line", "odds", "one_sided", "anchor_line", "same_line", "lam_open", "ev",
+           "book_class", "side", "line", "odds", "one_sided", "anchor_line", "same_line", "anchor_multi_line", "lam_open", "ev",
            "ev_nb", "flagged", "lam_close", "close_ev", "close_ev_nb", "close_ev_median", "close_status",
            "hours_to_kickoff", "quote_age_min", "snapshot_ts", "close_ts"]
 
@@ -270,7 +273,7 @@ def _table(rows):
     return pd.DataFrame(rows).to_string(index=False, float_format=lambda v: f"{v:.4f}")
 
 
-def report(df, unresolved=(), season_settled=False):
+def report(df, unresolved=(), season_settled=False, now=None):
     lines = []
     prim = df[df["anchor"] == ANCHOR_BOOK] if not df.empty else df
     g = gate_group(df)
@@ -312,11 +315,21 @@ def report(df, unresolved=(), season_settled=False):
         lines.append(f"Pinnacle-anchored offers: {len(prim)} on {prim['event_id'].nunique()} games, "
                      f"{prim['player'].nunique()} players, books: {', '.join(sorted(prim['book'].unique()))}")
         lines.append(f"BetOnline-anchored offers: {len(alt)}")
+        sight = prim.drop_duplicates(["event_id", "player", "snapshot_ts"])
+        lines.append(f"several anchor lines: {int(sight['anchor_multi_line'].sum())} of {len(sight)} Pinnacle "
+                     f"(event, player) sightings priced off the line nearest 50/50")
         cs = prim["close_status"].value_counts().to_dict()
         lines.append(f"close status (Pinnacle rows): {cs}")
         if "result" in df:
             gr = prim["grade_status"].value_counts().to_dict() if "grade_status" in prim else {}
             lines.append(f"grading status (Pinnacle rows): {gr}")
+            now = _utc(now) if now is not None else pd.Timestamp.now(tz="UTC")
+            pend = df[df.get("grade_status", pd.Series(index=df.index, dtype=object)) == "pending"]
+            stale = pend[[_utc(k) < now - pd.Timedelta(days=STALE_PENDING_DAYS) for k in pend["kickoff"]]]
+            if len(stale):
+                games = stale.drop_duplicates("event_id")
+                lines.append(f"still pending {STALE_PENDING_DAYS}+ days after kickoff (check the nflverse download): "
+                             + ", ".join(f"{r.away_team} @ {r.home_team} ({r.kickoff})" for r in games.itertuples()))
     if unresolved:
         lines.append("ungraded players (never guessed):")
         lines += [f"  {u['game']}: {u['player_name']} ({u['reason']})" for u in unresolved]

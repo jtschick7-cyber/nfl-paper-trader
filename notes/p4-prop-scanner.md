@@ -23,9 +23,10 @@ Builder choices where the spec is silent (structure, not rules):
 
 - A book quoting several two-sided lines for one player gives its λ* from the line whose de-vigged `q_over` is nearest 0.5 (ties: the lower line). This applies to the anchor at open and close, and to each book in the close median.
 - Several open snapshots for one event each yield sightings (P1 captures one, so normally one).
-- A player with offensive snaps but no stats row is listed as `no_stats_row` and left ungraded, rather than assumed to have 0 receptions. That avoids grading a name mismatch between the two nflverse files.
+- A player with offensive snaps but no stats row for the game is graded as 0 receptions (`graded_zero`) when the name matches exactly one stats-file player on the same team elsewhere in the season. The nflverse stats file only holds players who recorded a stat, so this is usually a real 0 catches, and dropping those rows would tilt the W-L toward Overs. Otherwise the player is listed as `no_stats_row` and left ungraded, since the name may not match between the two files. (Changed on owner approval, 2026-11-24, before any open or close capture existed.)
+- The report's coverage section counts how many Pinnacle sightings had several anchor lines (so the nearest-50/50 rule fired). It also lists games still `pending` 3+ days after kickoff (`STALE_PENDING_DAYS`, a report-only setting), so a stuck nflverse download gets noticed.
 - A game with no rows yet in either nflverse file is `pending`. Such players are not graded and not listed as unmatched.
-- The CSV adds `anchor`, `anchor_line`, `same_line`, `close_status`, `grade_status`, `snapshot_ts`, `close_ts`, `home_team`, `away_team`, `player_name` to the spec's columns.
+- The CSV adds `anchor`, `anchor_line`, `same_line`, `anchor_multi_line`, `close_status`, `grade_status`, `snapshot_ts`, `close_ts`, `home_team`, `away_team`, `player_name` to the spec's columns.
 
 ## First run, 2026-11-24 (archive `origin/odds-data`, props/ as of ~21:50 UTC)
 
