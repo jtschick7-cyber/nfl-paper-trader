@@ -22,7 +22,9 @@ One task per session, one branch and PR per task (`claude/r1-decision-timing`, a
 | P2 | [P2-topdown-v2.md](P2-topdown-v2.md) | M | none; creates `src/total_pricing.py` | No, offline; rules frozen 2026-11-24, evaluation sample from 11-25 |
 | P3 | [P3-totals-kill-test.md](P3-totals-kill-test.md) | S–M | `src/total_pricing.py` (P2, or built here to P2's spec) | No, offline |
 
-Still to spec: the prop pricer and top-down prop scanner (after P1's probe shows which books carry `player_receptions`), and the bottom-up receptions model (after the owner decides on buying historical prop odds).
+| P4 | [P4-prop-scanner.md](P4-prop-scanner.md) | M | P1 (archive), `src/total_pricing.py` (P2) | No, offline; rules frozen 2026-11-24 |
+
+Still to spec: the bottom-up receptions model (after the owner decides on buying historical prop odds).
 
 **R1 has a deadline.** The Tuesday workflow captures next week's look-ahead openers every time it runs. If R1 is live before **Tue 2026-11-17 15:17 UTC**, week 12 is the first clean week with no migration. After that, run the migration step in the R1 spec.
 
