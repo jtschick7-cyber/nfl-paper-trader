@@ -2,30 +2,35 @@
 
 ## Current state
 
-- **Branch:** `claude/phase3-market-consensus` (PR open). R1–R5, audit Phases 1–2 and P0-7 merged as PRs #14–#21.
-- **Last task:** Audit Phase 3 consensus pricer and archive replay (2026-11-21); results in `notes/phase3-market-consensus.md`.
-- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
-- **After Phase 1 merges (first runs):** closing monitor makes a second capture inside T-20m; `Model_Scorecard` summary rows end with `Bets w/ Close`; the slate shows only the decision week; Tuesday log shows "Restore play-by-play cache".
-- **After R5 merges (first Tuesday opening run):** new V3/V4 rows carry the new `artifact_id` (`v3_2012-2025_<new hash>`, likewise v4); `Model_Scorecard` in-week block shows a `Model v3 [<artifact_id>]` line per artifact once both appear; no V3/V4 pick at zero disagreement.
-- **After the first live Tuesday run with R1 (still pending):** no week-13 row has an opening line; every new pick has `pick_made_at`, `opening_book`, `opening_quote_at`, `decision_regime = in_week`; `x-requests-remaining` in the capture log looks sane.
-- **After the next scorecard refresh (R2 merged):** `V2_Shadow`, `V3_Shadow`, `V4_Shadow` end with `artifact_id`, `decision_regime`; the loggers ran without a header error; `Model_Scorecard` legacy block holds v2's 6 and v3's 4 old bets; guard count is 3.
-- **After R3 merged (PR #16):** run the "Backfill raw leans" workflow as a dry run, review it (expect V2 57, V3 27 with 19 at ≥ 1.5 pts and 93 pre-fix skipped, V4 42 with 2 blank sides, plus any rows logged since 11-13), then once with `apply`. After the next Tuesday run: new shadow rows end with `raw_mu_home_margin`, `raw_lean_pts`, `raw_lean_side`, and `Model_Scorecard` ends with the raw-lean section.
+- **Branch:** `main`. PRs #14–#22 (R1–R5, audit Phases 1–3, P0-7) are merged; the 2026-11-24 live check is on `claude/live-check-2026-11-24`.
+- **Last task:** live check of the 2026-11-24 Tuesday run (week 12, the first in-week slate). Every check passed; see the log.
+- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
 
 | Task | Spec | Status |
 |---|---|---|
-| R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR #14), live check pending |
-| R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR), live check pending |
-| R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR), backfill and live check pending |
+| R1 decision timing | `notes/implementation-plan/R1-decision-timing.md` | done (PR #14), live check passed 11-24 |
+| R2 scorecard hygiene | `notes/implementation-plan/R2-scorecard-hygiene.md` | done (PR #15), live check passed 11-24 |
+| R3 raw-lean tracking | `notes/implementation-plan/R3-raw-lean-tracking.md` | done (PR #16), backfilled 11-14, live check passed 11-24 |
 | R4 production backtest | `notes/implementation-plan/R4-production-backtest.md` | done (PR #17) |
-| R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check pending |
-| Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR #19), live check pending |
+| R5 price-consistent anchor | `notes/implementation-plan/R5-price-consistent-anchor.md` | done (PR #18), live check passed 11-24 |
+| Audit Phase 1 safety fixes | owner's audit, Phase 1 row | done (PR #19), live check passed 11-24 |
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
-| Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR), live tab held |
+| Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
 
 ## Log
+
+### 2026-11-24: live check of the Tuesday run (week 12) and Phase 3 replay
+
+- Read-only. Tuesday run 45423885996: decision week 12, 16 games captured, 93 future games skipped; v1 picked 5, v2/v3/v4 picked none.
+- Phase 1 pass: week-11 Sunday and Monday closes landed T-10 to T-17 min (week 10 was T-45); `Bets w/ Close` present; slate is week 12 only; "Restore play-by-play cache" step ran (first-run miss, saved). Only |raw lean| >= 7 game: v3 NE@LAC (−7.4), flagged SUSPICIOUS_OUTLIER, PASS since edge −1.97% is below threshold (R2 rule).
+- R5 pass: new rows carry `v3_2012-2025_132e614a` and `v4_2012-2025_995bf8ae`; no V3/V4 pick; one artifact in-week, so no per-artifact line yet (by design).
+- R1 pass: no week 13+ row has an opening line; all 16 week-12 rows have `opening_book`, `opening_quote_at`, `decision_regime = in_week`, and the 5 picks have `pick_made_at`. Requests remaining 432 (11-17) → 396 (11-24).
+- R2/R3 pass: the three shadow tabs end with `artifact_id`, `decision_regime`, raw-lean columns; 48 new rows, none with blank `raw_lean_side`; legacy v2 6 / v3 4 bets; guard count 3; RAW LEAN CLV sections present (in-week empty until week 12 settles).
+- Phase 3 replay: first run gave 41 flagged offers on 23 games, but 7 were unplayed week-12 games scored against the latest snapshot. Owner approved a fix: `closing_state` now skips games that kick off after the archive's latest snapshot (new test). Re-run: 47 played games, 34 flagged on 17, closing EV +3.1% ± 1.4% (game-clustered), 68% beat the close. Test not reached (needs 100 on 40).
 
 ### 2026-11-21: Audit Phase 3 consensus pricer and archive replay
 

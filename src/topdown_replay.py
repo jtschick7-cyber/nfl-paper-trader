@@ -3,6 +3,7 @@
     .venv/bin/python -m src.topdown_replay                 # reads origin/odds-data
     .venv/bin/python -m src.topdown_replay --source DIR    # a checkout of the branch
 
+Only events that kicked off by the archive's latest snapshot count (their close is final).
 For every snapshot taken before an event's last pre-kickoff snapshot (the "close"):
 - each book's offer is priced against the leave-one-out consensus (src/market_consensus.py);
   offers with EV >= --stale-ev are flagged, deduplicated on (event, book, side, line, price)
@@ -37,12 +38,17 @@ def _kickoff(event):
 
 def closing_state(snapshots, sigma=DEFAULT_SIGMA):
     """{event_id: dict(close_ts, close_mean, total_line, quotes)} from each event's last
-    snapshot strictly before kickoff."""
+    snapshot strictly before kickoff. Events that kick off after the archive's latest
+    snapshot are left out: a later snapshot could still change their close."""
     close = {}
+    if not snapshots:
+        return close
+    archive_end = max(pd.Timestamp(ts) for ts, _ in snapshots)
     for ts, events in snapshots:
         t = pd.Timestamp(ts)
         for e in events:
-            if t >= _kickoff(e):
+            k = _kickoff(e)
+            if t >= k or k > archive_end:
                 continue
             quotes = book_quotes(e)
             if not quotes:

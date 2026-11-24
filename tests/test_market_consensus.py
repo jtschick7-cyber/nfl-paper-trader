@@ -105,6 +105,18 @@ def test_archive_reader_and_replay(tmp_path):
     assert s.loc["flagged (EV >= threshold)", "offers"] == 1
 
 
+def test_replay_skips_events_that_have_not_kicked_off(tmp_path):
+    consensus = [_book("lowvig", -3.0), _book("betonlineag", -3.0), _book("draftkings", -3.0), _book("fanduel", -3.0)]
+    stale = consensus + [_book("betrivers", -1.5)]
+    played = lambda books: _event(books, eid="played", kickoff="2026-11-15T18:00:00Z")
+    future = lambda books: _event(books, eid="future", kickoff="2026-11-22T18:00:00Z")
+    _write_snap(tmp_path, "20261110T150000Z", [played(stale), future(stale)])
+    _write_snap(tmp_path, "20261115T170000Z", [played(consensus), future(consensus)])
+    _write_snap(tmp_path, "20261117T150000Z", [future(consensus)])  # latest snapshot, before "future" kicks off
+    df = replay(list(iter_archive(str(tmp_path))))
+    assert set(df["event_id"]) == {"played"}
+
+
 def test_cluster_se_counts_events_not_offers():
     x = [1.0, 1.0, 0.0, 0.0]
     assert cluster_se(x, ["a", "a", "b", "b"]) > cluster_se(x, ["a", "b", "c", "d"])
