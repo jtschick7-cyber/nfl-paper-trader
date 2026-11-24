@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `claude/p1-props-capture` (PR open, waits for owner merge). PRs #14–#23 are merged.
-- **Last task:** P1 build: `src/props/` capture loop, archiver, reader, `props_capture.yml`, Worker `SCHEDULE` entries. Not live yet.
-- **Next task:** owner merges P1 and redeploys the Worker (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Branch:** `claude/p2-topdown-v2` (PR open, waits for owner merge). PRs #14–#26 are merged, P1 (#26) included.
+- **Last task:** P2 top-down v2 replay, spreads and totals (`notes/p2-topdown-v2.md`). The evaluation sample is empty until snapshots from 2026-11-25 on arrive.
+- **Next task:** owner redeploys the Worker for P1 (merged) (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); also re-run `src.topdown_v2` weekly (frozen P2 gate on the evaluation sample, from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24; descriptive only, never stop early for a pass); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -21,10 +21,22 @@
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
 | P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
-| P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | spec written 11-24 (rules frozen), not built |
+| P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | spec written 11-24, not built |
 
 ## Log
+
+### 2026-11-24: P2 top-down v2 replay (spreads and totals)
+
+- New `src/total_pricing.py` (P3 reuses it): discretised-Normal totals with σ 13.2 and a continuity correction, `devig_two_way`, `total_implied_mean` (bisection), `price_total_offer`, `total_quotes`.
+- New `src/topdown_v2.py`: sharp-group anchor (BetOnline/LowVig as one vote), only US and offshore books priced, flag at EV ≥ 1.5%, a per-market close, `close_ev` and `close_ev_allbooks`, persistence, freshness, a design/evaluation sample split and grading of spreads and totals. Writes `data/topdown_v2_offers.csv` (gitignored).
+- Every spec constant is frozen and asserted in a test. `gate()` returns pass, fail or inconclusive, or `pending` before week 18 settles (`--season-settled`).
+- Phase 3 files were not edited.
+- First run, archive 6466ba8: 52 snapshots, all before `EVAL_START`, so the evaluation sample is empty and the gate is pending (0 of 80 offers, 0 of 35 games).
+- Design sample, not evidence: 6,052 first sightings on 47 games. The gate group is 9 offers on 9 games, close_ev +2.1% ± 1.0% (game-clustered), +0.9% with the top 2 games removed, 5-4.
+- `anchor_groups` was 1 on every row: only BetOnline is in the archive. No book fell outside the classes.
+- Tests: true iff `pytest tests/ -q` reports 1694 passed (28 new, after P1's 1666) and the Worker tests report 10 passed.
+- Owner question still open (spec): add mid-week snapshots so the 80/35 size can be reached this season. Without them, expect the gate to still be pending at week 18.
 
 ### 2026-11-24: P1 probe and Wednesday Worker cron
 
