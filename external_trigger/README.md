@@ -13,7 +13,7 @@ concurrency groups queue rather than overlap.
 |---|---|---|
 | `17 5 * * *` | `nightly_results.yml` | Settle finished games |
 | `17 15 * * TUE` | `tuesday_opening.yml` | Tuesday opening capture + picks + shadow logs |
-| `30 13,17,21 * * MON,THU,FRI,SAT` | `closing_line_monitor.yml`, then `props_capture.yml` | Mon/Thu/Fri/Sat closing loop (exits at once if no games) |
+| `30 13,17,21 * * MON,WED,THU,FRI,SAT` | `closing_line_monitor.yml`, then `props_capture.yml` | Mon/Wed/Thu/Fri/Sat closing loop (exits at once if no games; Wed covers Wednesday games such as GB @ LA on 2026-11-25) |
 | `30 10,15,20 * * SUN` | `closing_line_monitor.yml`, then `props_capture.yml` | Sunday: London, 1pm/4pm ET slates, SNF |
 
 Edit `SCHEDULE` in `src/index.js` and `crons` in `wrangler.toml` together;

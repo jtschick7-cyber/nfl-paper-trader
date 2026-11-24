@@ -76,7 +76,7 @@ test("runCron dispatches the mapped workflow and rejects unknown crons", async (
 });
 
 test("closing crons dispatch the closing loop first, then props capture", async () => {
-  const closing = ["30 13,17,21 * * MON,THU,FRI,SAT", "30 10,15,20 * * SUN"];
+  const closing = ["30 13,17,21 * * MON,WED,THU,FRI,SAT", "30 10,15,20 * * SUN"];
   for (const cron of closing) {
     assert.deepEqual(SCHEDULE[cron], ["closing_line_monitor.yml", "props_capture.yml"], cron);
     const f = fakeFetch([204, 204]);
