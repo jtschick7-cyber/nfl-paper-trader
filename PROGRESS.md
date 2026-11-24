@@ -4,6 +4,7 @@
 
 - **Branch:** `claude/p3-totals-kill-test` (PR open, waits for owner merge). PRs #14–#28 are merged, P1 (#26) and P2 (#27) included.
 - **Last task:** P3 totals kill test (`notes/p3-totals-kill-test.md`): **KILL**. Bottom-up totals are closed; top-down totals (P2) are unaffected.
+- **Mid-week snapshots:** `claude/midweek-snapshots` (PR open). After merge the owner redeploys the Worker (`cd external_trigger && npm run deploy`), ideally before Wed 2026-12-02 13:30 UTC; one redeploy also covers P1's.
 - **Next task:** owner redeploys the Worker for P1 (merged) (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); also re-run `src.topdown_v2` weekly (frozen P2 gate on the evaluation sample, from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24; descriptive only, never stop early for a pass); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
@@ -23,9 +24,19 @@
 | P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
+| Mid-week game-odds snapshots | owner answer to the P2 owner question (11-24); `notes/midweek-snapshots.md` | built 11-24 (`claude/midweek-snapshots`); awaiting merge and Worker redeploy before Wed 12-02 13:30 UTC |
 | P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | spec written 11-24 (rules frozen), not built |
 
 ## Log
+
+### 2026-11-24: mid-week game-odds snapshots built
+
+- Owner approved the P2 owner question: one extra game-odds snapshot on Wed/Thu/Sat from 17:30 UTC, about 2 credits each, so the P2 gate (80 offers on 35 games) can fill this season.
+- New `src/midweek_snapshot.py` and `midweek_snapshots.yml` (group `midweek-snapshots`, top-level `contents: read`, job `contents: write`, `ODDS_API_KEY` only, backup cron `47 17 * * 3,4,6`). Same request as `fetch_odds_api` (a test compares the params); files land in `odds-data` `snapshots/YYYY/MM/` via `push_odds_snapshots.sh` with `SNAP_DIR`, so `src.topdown_v2` reads them unchanged.
+- Self-gating: Wed/Thu/Sat, at or after 17:25 UTC, and no call if `odds-data` already holds any snapshot since 17:25 UTC today; ledger read before any paid call, nothing called if it fails.
+- Guards: 2 paid calls per run (second only retries network/429/5xx), quota floor 80 (as P1) read from the free `/events` call, one call while the quota is unknown. Weekly burn about 36 (spreads) + 30 (props) + 6 = 72.
+- Worker `SCHEDULE`: `midweek_snapshots.yml` appended to the `30 13,17,21 * * MON,WED,THU,FRI,SAT` entry; still 4 crons. Phase 3 `src.topdown_replay` also reads `snapshots/`, so it sees these too; no Phase 3 rule changed. No existing workflow, reader or request edited.
+- Tests: true iff `pytest tests/ -q` reports 1746 passed (31 new) and the Worker tests report 11 passed. No Odds API call was made locally. Owner: after merge, `cd external_trigger && npm run deploy`, ideally before Wed 12-02 13:30 UTC (the GitHub backup cron covers late days meanwhile).
 
 ### 2026-11-24: P3 offline totals kill test: KILL
 

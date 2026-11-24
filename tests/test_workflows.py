@@ -72,3 +72,25 @@ def test_props_capture_runs_alone_with_no_sheet_secrets():
     assert "GSHEET" not in text and "SPREADSHEET" not in text
     assert "python -m src.props.capture_props" in text
     assert "bash scripts/push_prop_snapshots.sh" in text
+
+
+def test_midweek_snapshots_runs_alone_with_odds_key_only():
+    wf = _load("midweek_snapshots.yml")
+    assert wf["concurrency"]["group"] == "midweek-snapshots"
+    assert wf["concurrency"]["cancel-in-progress"] is False
+    assert wf["permissions"]["contents"] == "read"
+    job = wf["jobs"]["snapshot"]
+    assert job["permissions"] == {"contents": "write"}
+    assert set(job["env"]) == {"ODDS_API_KEY"}
+    triggers = wf.get("on", wf.get(True))
+    assert "workflow_dispatch" in triggers
+    # Backup cron on Wed/Thu/Sat (GitHub numbering), after the Worker's 17:30 wake.
+    assert [e["cron"] for e in triggers["schedule"]] == ["47 17 * * 3,4,6"]
+    with open(os.path.join(WORKFLOWS, "midweek_snapshots.yml")) as f:
+        text = f.read()
+    assert "GSHEET" not in text and "SPREADSHEET" not in text
+    assert "python -m src.midweek_snapshot" in text
+    assert "bash scripts/push_odds_snapshots.sh" in text
+    assert "SNAP_DIR: data/midweek_cache/snapshots" in text
+    push = [s for s in job["steps"] if "push_odds_snapshots" in s.get("run", "")][0]
+    assert push["if"] == "always()"
