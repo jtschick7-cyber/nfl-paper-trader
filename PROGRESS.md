@@ -4,7 +4,7 @@
 
 - **Branch:** `main`. PRs #14–#22 (R1–R5, audit Phases 1–3, P0-7) are merged; the 2026-11-24 live check is on `claude/live-check-2026-11-24`.
 - **Last task:** live check of the 2026-11-24 Tuesday run (week 12, the first in-week slate). Every check passed; see the log.
-- **Next task:** re-run `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Next task:** build P1 prospective prop archive (`notes/implementation-plan/P1-props-capture.md`); deadline Fri 2026-11-27 17:30 UTC for week 12, else Thu 12-03 for week 13. Also keep re-running `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -20,6 +20,7 @@
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
+| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | spec written 11-24, not built |
 
 ## Log
 
