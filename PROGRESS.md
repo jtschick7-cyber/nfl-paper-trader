@@ -2,7 +2,7 @@
 
 ## Current state
 
-- **Branch:** `claude/p5a-receptions-stage-a` (PR open, waits for owner merge). PRs #14–#32 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), the PROGRESS refresh and P5 spec (#31), and P4 (#32).
+- **Branch:** `claude/p5a-receptions-stage-a` (PR #34 open, waits for owner merge). PRs #14–#32 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), the PROGRESS refresh and P5 spec (#31), and P4 (#32).
 - **Last task:** P5a Stage A ran once: **FAIL** (`notes/p5a-receptions-stage-a.md`). Δ LL_sum −0.0430 ± 0.0050 (−8.7 SE), negative in all 6 gate seasons and in the injury subset, but 15 of 29 tested calibration bins miss. Step 5 is closed: no P5b, no live logging.
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
 - **Next task:** Step 5 is closed (P5a FAIL), so there is no P5b. Next is the P1 live check after the first Friday and Sunday (P1 spec "Live check"), and the owner's next roadmap item.
