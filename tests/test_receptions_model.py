@@ -187,3 +187,29 @@ def test_frozen_model_and_stage_a_constants():
     assert B.GATE_SEASONS == tuple(range(2020, 2026))
     assert B.GATE_SE == 3.0
     assert B.GATE_MIN_SEASONS == 4
+
+
+# --- end to end on a synthetic league -----------------------------------------------
+
+def test_walk_forward_end_to_end_on_synthetic_league():
+    from tests.test_receptions_features import _league
+    from src.props import features as F
+
+    games, snaps, stats, inj, pace, pos = _league(seasons=(2016, 2017, 2018, 2019, 2020), weeks=8, seed=11)
+    frame = F.build_player_frame(games, snaps, stats, inj, pace, pos)
+    uni, counts = F.apply_universe(frame)
+    assert T.fit_fold(uni, games, 2018) is None
+    folds, preds = [], []
+    for s in (2019, 2020):
+        p, info = T.fit_fold(uni, games, s)
+        assert info["alpha"] in T.ALPHA_GRID and info["inner"][0] == 2018
+        assert np.isfinite(p["mu_model"]).all() and (p["mu_model"] > 0).all()
+        folds.append(info)
+        preds.append(p)
+    scored = B.score(pd.concat(preds), folds)
+    assert np.isfinite(scored[["ll_sum_model", "ll_sum_base", "log_score_model", "crps_base"]].values).all()
+    s = B.summarize(scored)
+    assert s["gate"]["verdict"] in ("PASS", "FAIL")
+    cov = {"snap_rows_reg": len(snaps), "snap_rows_unmatched": 0, "unmatched_by_season": {}}
+    text = B.report(s, folds, [2018], counts, cov, uni)
+    assert text.startswith("STAGE A VERDICT") and "2018: skipped" in text
