@@ -38,6 +38,11 @@
 - Tests: true iff `pytest tests/ -q` reports 1694 passed (28 new, after P1's 1666) and the Worker tests report 10 passed.
 - Owner question still open (spec): add mid-week snapshots so the 80/35 size can be reached this season. Without them, expect the gate to still be pending at week 18.
 
+### 2026-11-24: P1 probe and Wednesday Worker cron
+
+- Probe run 45488926007 (GB @ LA, 1 credit, 395 left): 7 of 10 books returned `player_receptions`, all with both Over and Under except BetRivers (Over only). Pinnacle, DraftKings, FanDuel, BetOnline and Bovada had 15 players; BetMGM had 12. `williamhill_us`, `betus` and `mybookieag` returned nothing; recheck on the first real captures before replacing them.
+- Week 12 has a Wednesday game (GB @ LA, 01:00 UTC Thu) and the Worker had no Wednesday cron. Added `WED` to `30 13,17,21 * * MON,THU,FRI,SAT`, still 4 crons. The closing loop and props capture now both run on Wednesdays. Owner redeploys the Worker.
+
 ### 2026-11-24: P1 prop archive capture built
 
 - New package `src/props/`: `capture_props.py` (self-pacing loop, `--probe`), `archive_props.py` (gzip into `props/YYYY/MM/`, `mtime=0`), `load_prop_archive.py` (reads only `props/`). New `scripts/push_prop_snapshots.sh` (copy of the odds push script, same 3-attempt retry).
