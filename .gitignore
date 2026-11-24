@@ -28,3 +28,4 @@ data/props_cache/
 data/topdown_v2_*.csv
 data/totals_backtest_games.csv
 data/midweek_cache/
+data/topdown_props_*.csv
