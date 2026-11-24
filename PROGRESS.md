@@ -2,9 +2,9 @@
 
 ## Current state
 
-- **Branch:** `main`. PRs #14–#22 (R1–R5, audit Phases 1–3, P0-7) are merged; the 2026-11-24 live check is on `claude/live-check-2026-11-24`.
-- **Last task:** live check of the 2026-11-24 Tuesday run (week 12, the first in-week slate). Every check passed; see the log.
-- **Next task:** build P1 prospective prop archive (`notes/implementation-plan/P1-props-capture.md`); deadline Fri 2026-11-27 17:30 UTC for week 12, else Thu 12-03 for week 13. Also keep re-running `src.topdown_replay` weekly on the growing archive (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
+- **Branch:** `claude/p1-props-capture` (PR open, waits for owner merge). PRs #14–#23 are merged.
+- **Last task:** P1 build: `src/props/` capture loop, archiver, reader, `props_capture.yml`, Worker `SCHEDULE` entries. Not live yet.
+- **Next task:** owner merges P1 and redeploys the Worker (`cd external_trigger && npm run deploy`) by Fri 2026-11-27 17:30 UTC (else week 13, Thu 12-03 13:30 UTC), then dispatches `props_capture.yml` with `probe: true` (1 credit) and the probe result is recorded on the PR (which books returned `player_receptions`, `x-requests-last`). Then the P1 live check after the first Friday and Sunday (spec "Live check"). Also keep re-running `src.topdown_replay` weekly (pre-registered test in the Phase 3 note; 34 of 100 flagged offers, 17 of 40 played games on 11-24); Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
 - **Still to see live:** the first graded in-week rows (week 12 settles 11-26 to 12-01), so the in-week summary and in-week RAW LEAN CLV fill; a SUPPRESS_DANGER row (needs |raw lean| >= 7 pts and an edge above the threshold); `Model v3 [<artifact_id>]` lines (appear only when the in-week rows hold two artifacts, so after a retrain).
 
 ## Task queue
@@ -20,11 +20,22 @@
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
-| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | spec written 11-24, not built |
+| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | spec written 11-24 (rules frozen), not built |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | spec written 11-24, not built |
 
 ## Log
+
+### 2026-11-24: P1 prop archive capture built
+
+- New package `src/props/`: `capture_props.py` (self-pacing loop, `--probe`), `archive_props.py` (gzip into `props/YYYY/MM/`, `mtime=0`), `load_prop_archive.py` (reads only `props/`). New `scripts/push_prop_snapshots.sh` (copy of the odds push script, same 3-attempt retry).
+- Targets as specified: open = min(k − 4h, first Fri 21:00 UTC at or after k − 4d), due until k − 120 min; close target k − 25, due k − 40 to k − 5. Game list from the free `/events` call; ledger = `origin/odds-data` `props/` listing plus local `data/props_cache/` files (gitignored).
+- Request: `/events/{id}/odds`, 10-book `bookmakers=` list incl. Pinnacle, `markets=player_receptions`, no `regions`. Guards: 20 credits/run (earliest kickoffs first), 80-credit floor, one call while the quota is unknown. Env overrides `PROPS_MAX_CREDITS`, `PROPS_QUOTA_FLOOR`, `PROPS_BOOKMAKERS`, `PROPS_MAX_MINUTES`.
+- A run exits 1 (red) when the events call or ledger read failed, a capture call errored, or a due capture was skipped by a guard. If the ledger can't be read, that wake captures nothing, so no game is paid for twice. A run whose budget is used up exits early so the next queued run starts with a fresh cap.
+- `props_capture.yml`: group `props-capture`, top-level `contents: read`, job `contents: write`, `ODDS_API_KEY` only, timeout 345, backup cron `47 16 * * 4,5`, `probe` input. Worker `SCHEDULE`: `props_capture.yml` appended after `closing_line_monitor.yml` on both closing crons; still 4 crons, `wrangler.toml` unchanged.
+- The spread pipeline is unchanged: `closing_loop.py`, `closing_line_monitor.yml`, `tuesday_opening.yml`, `src/config.py`, `src/odds_utils.py` and `push_odds_snapshots.sh` were not edited. A test checks that the spread and prop readers each list only their own files.
+- No Odds API call was made locally. Tests: pytest 1630 → 1666, node 8 → 10, all green.
+- Owner to do after merge: redeploy the Worker, dispatch the probe, then swap out any book that returned no props (candidates in the spec).
 
 ### 2026-11-24: live check of the Tuesday run (week 12) and Phase 3 replay
 

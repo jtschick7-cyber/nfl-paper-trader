@@ -15,10 +15,12 @@ export const SCHEDULE = {
   // Closing-line loop on Mon/Thu/Fri/Sat. Each run sleeps until its kickoff
   // targets for up to 320 min and exits at once when there are none, so the
   // 13:30 and 17:30 starts only matter for afternoon games (Thanksgiving,
-  // Christmas, Saturdays late in the season).
-  "30 13,17,21 * * MON,THU,FRI,SAT": ["closing_line_monitor.yml"],
+  // Christmas, Saturdays late in the season). Props capture (task P1) rides on
+  // the same crons and paces itself to its own open/close targets; it is listed
+  // second because runCron stops at the first failed dispatch.
+  "30 13,17,21 * * MON,THU,FRI,SAT": ["closing_line_monitor.yml", "props_capture.yml"],
   // Sunday closing loop: London games, 1pm/4pm ET slates, then SNF.
-  "30 10,15,20 * * SUN": ["closing_line_monitor.yml"],
+  "30 10,15,20 * * SUN": ["closing_line_monitor.yml", "props_capture.yml"],
 };
 
 const API = "https://api.github.com";
