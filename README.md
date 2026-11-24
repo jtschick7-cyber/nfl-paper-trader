@@ -99,6 +99,7 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 | :--- | :--- | :--- |
 | `tuesday_opening.yml` | Tue 15:17, 18:17, 23:17; Wed/Thu 18:17 | Schedule, then for the current decision week only (see **Decision window**): opening lines, v1 picks, v2–v4 shadow logs; scorecard. Later runs in the week only act if an earlier one stopped for missing results |
 | `closing_line_monitor.yml` | Gameday cron (Wed–Mon) | **Self-pacing closing loop** (below), then scorecard if settled bets got a close |
+| `props_capture.yml` | Worker, with the closing crons; backup Thu/Fri 16:47 | P1: self-pacing `player_receptions` open and close capture per game into `odds-data` `props/` (no Sheet access; `probe` input spends 1 credit) |
 | `nightly_results.yml` | Daily 05:17 | Catch up missed closes from cached snapshots, settle results, scorecard |
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
 | `migrate_lookahead_openers.yml` | Manual, one-off | R1 migration: move look-ahead openers for a later week out of the opening columns (dry run unless `apply` is ticked) |
@@ -115,7 +116,7 @@ GitHub drops most dense cron triggers on busy days, so the closing monitor does 
 Sheet writes address rows by position, so the short writers (Tuesday, nightly, v2/v3 loggers and the closing workflow's scorecard job) share the `sheet-writer` concurrency group and never overlap. The hours-long closing loop keeps its own group: GitHub keeps only one pending run per group and cancels it when a newer one queues, so a loop inside `sheet-writer` would let the next closing cron cancel a Tuesday or nightly run waiting behind it. Instead, before writing, the loop re-reads the `game_id` column and drops any update whose row no longer holds the game it read.
 
 ### Durable odds snapshots
-Every Odds API fetch is saved as a timestamped snapshot in `data/odds_cache/snapshots/`, which lives only in the Actions cache (pruned to 72 hours, evicted after 7 idle days). The Tuesday and closing workflows run `scripts/push_odds_snapshots.sh`, which gzips new snapshots into the orphan **`odds-data`** branch under `snapshots/YYYY/MM/`. `main` never carries them. To read them:
+Every Odds API fetch is saved as a timestamped snapshot in `data/odds_cache/snapshots/`, which lives only in the Actions cache (pruned to 72 hours, evicted after 7 idle days). The Tuesday and closing workflows run `scripts/push_odds_snapshots.sh`, which gzips new snapshots into the orphan **`odds-data`** branch under `snapshots/YYYY/MM/`. `props_capture.yml` archives player-prop snapshots the same way under `props/YYYY/MM/` (`scripts/push_prop_snapshots.sh`, read with `src/props/load_prop_archive.py`). `main` never carries them. To read them:
 
 ```bash
 git fetch origin odds-data && git worktree add ../odds-data origin/odds-data

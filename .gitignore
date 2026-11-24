@@ -24,3 +24,4 @@ data/sheet_dump/
 data/backtest_production_*.csv
 data/team_game_epa_dropback.csv
 data/topdown_replay_*.csv
+data/props_cache/

@@ -54,3 +54,21 @@ def test_no_cron_fires_at_top_of_hour():
             minutes = entry["cron"].split()[0]
             assert "0" not in minutes.split(","), f"{path}: {entry['cron']}"
             assert "*" not in minutes, f"{path}: {entry['cron']}"
+
+
+def test_props_capture_runs_alone_with_no_sheet_secrets():
+    wf = _load("props_capture.yml")
+    assert wf["concurrency"]["group"] == "props-capture"
+    assert wf["concurrency"]["cancel-in-progress"] is False
+    assert wf["permissions"]["contents"] == "read"
+    job = wf["jobs"]["capture"]
+    assert job["permissions"]["contents"] == "write"
+    assert job["timeout-minutes"] == 345
+    triggers = wf.get("on", wf.get(True))
+    assert "workflow_dispatch" in triggers
+    assert triggers["workflow_dispatch"]["inputs"]["probe"]["type"] == "boolean"
+    with open(os.path.join(WORKFLOWS, "props_capture.yml")) as f:
+        text = f.read()
+    assert "GSHEET" not in text and "SPREADSHEET" not in text
+    assert "python -m src.props.capture_props" in text
+    assert "bash scripts/push_prop_snapshots.sh" in text
