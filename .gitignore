@@ -26,3 +26,4 @@ data/team_game_epa_dropback.csv
 data/topdown_replay_*.csv
 data/props_cache/
 data/topdown_v2_*.csv
+data/totals_backtest_games.csv
