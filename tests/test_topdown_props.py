@@ -332,3 +332,44 @@ def test_gate_group_selection():
         "flagged": [True, False, True, True, True],
         "close_ev": [0.01, 0.01, 0.01, 0.01, float("nan")]})
     assert list(tp.gate_group(df).index) == [0]
+
+
+# ---- follow-ups (owner, 2026-11-24): zero-catch grading, coverage counts ----------------------
+
+def test_snaps_but_no_game_stats_row_grades_zero_when_name_seen_in_season():
+    other = "2026_12_DET_GB"
+    stats = _stats([("p7", "Kalif Raymond", "DET", other, 2), ("p1", "Amon-Ra St. Brown", "DET", GID, 7)])
+    snaps = _snaps([("s7", "Kalif Raymond", "DET", GID, 20), ("s1", "Amon-Ra St. Brown", "DET", GID, 60)])
+    offers = _offers([("Kalif Raymond", "UNDER", 0.5, 150), ("Kalif Raymond", "OVER", 0.5, -200)])
+    out, unresolved = ps.attach_results(offers, stats, snaps)
+    assert list(out["result"]) == ["WIN", "LOSS"] and list(out["receptions"]) == [0, 0]
+    assert out.iloc[0]["units"] == pytest.approx(1.5) and set(out["grade_status"]) == {"graded_zero"}
+    assert not unresolved
+
+
+def test_snaps_but_no_stats_row_all_season_stays_ungraded():
+    stats = _stats([("p1", "Amon-Ra St. Brown", "DET", GID, 7),
+                    ("p8", "Kalif Raymond", "CHI", "2026_12_CHI_GB", 1)])   # same name, other team
+    snaps = _snaps([("s7", "Kalif Raymond", "DET", GID, 20), ("s1", "Amon-Ra St. Brown", "DET", GID, 60)])
+    out, unresolved = ps.attach_results(_offers([("Kalif Raymond", "UNDER", 0.5, 150)]), stats, snaps)
+    assert out.iloc[0]["result"] is None and out.iloc[0]["grade_status"] == "no_stats_row"
+    assert [u["reason"] for u in unresolved] == ["no_stats_row"]
+
+
+def test_multi_line_anchor_counted():
+    snaps = [_snap("open", [
+        _book("pinnacle", [("Jahmyr Gibbs", 2.5, -250, 190), ("Jahmyr Gibbs", 3.5, -105, -115),
+                           ("Sam LaPorta", 4.5, -110, -110)]),
+        _book("fanduel", [("Jahmyr Gibbs", 3.5, -110, -110), ("Sam LaPorta", 4.5, -110, -110)]),
+    ], OPEN_AT)]
+    df = tp.replay(snaps)
+    multi = dict(zip(df["player"], df["anchor_multi_line"]))
+    assert multi == {"jahmyr gibbs": True, "sam laporta": False}
+    assert "several anchor lines: 1 of 2 Pinnacle (event, player) sightings" in tp.report(df)
+
+
+def test_report_lists_stale_pending_games():
+    df = tp.replay(_basic_snaps()).assign(result=None, units=float("nan"), grade_status="pending")
+    now = pd.Timestamp(KICK) + pd.Timedelta(days=tp.STALE_PENDING_DAYS, hours=1)
+    assert "still pending" in tp.report(df, now=now) and "CHI @ DET" in tp.report(df, now=now)
+    assert "still pending" not in tp.report(df, now=pd.Timestamp(KICK) + pd.Timedelta(days=1))
