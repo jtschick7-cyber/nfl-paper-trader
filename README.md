@@ -100,6 +100,7 @@ The scorecard's CLV uses `closing_consensus_line` when present (one book's numbe
 | `tuesday_opening.yml` | Tue 15:17, 18:17, 23:17; Wed/Thu 18:17 | Schedule, then for the current decision week only (see **Decision window**): opening lines, v1 picks, v2–v4 shadow logs; scorecard. Later runs in the week only act if an earlier one stopped for missing results |
 | `closing_line_monitor.yml` | Gameday cron (Wed–Mon) | **Self-pacing closing loop** (below), then scorecard if settled bets got a close |
 | `props_capture.yml` | Worker, with the closing crons; backup Thu/Fri 16:47 | P1: self-pacing `player_receptions` open and close capture per game into `odds-data` `props/` (no Sheet access; `probe` input spends 1 credit) |
+| `midweek_snapshots.yml` | Worker, with the weekday closing cron; backup Wed/Thu/Sat 17:47 | One extra game-odds snapshot (same request, about 2 credits) on Wed/Thu/Sat from 17:30, self-gated to one a day, into `odds-data` `snapshots/` for P2 (`notes/midweek-snapshots.md`; no Sheet access) |
 | `nightly_results.yml` | Daily 05:17 | Catch up missed closes from cached snapshots, settle results, scorecard |
 | `v2_shadow_logger.yml`, `v3_shadow_logger.yml` | Manual | Re-run the shadow loggers |
 | `migrate_lookahead_openers.yml` | Manual, one-off | R1 migration: move look-ahead openers for a later week out of the opening columns (dry run unless `apply` is ticked) |

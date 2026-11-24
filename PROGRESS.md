@@ -2,9 +2,10 @@
 
 ## Current state
 
-- **Branch:** `claude/p4-prop-scanner` (PR #32 open, waits for owner merge). PRs #14–#31 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), and the PROGRESS refresh and P5 spec (#31).
+- **Branch:** `claude/midweek-snapshots` (PR #33 open, waits for owner merge). PRs #14–#32 are merged: P1 (#26), P2 (#27), the P4 spec (#29), P3 (#30), the PROGRESS refresh and P5 spec (#31), and P4 (#32).
 - **Last task:** P4 prop scanner built (`notes/p4-prop-scanner.md`). First run: the archive held only P1's probe (excluded), so the evaluation is empty and the gate is pending (0 of 150 offers, 0 of 30 games).
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
+- **Mid-week snapshots:** `claude/midweek-snapshots` (PR open). After merge the owner redeploys the Worker (`cd external_trigger && npm run deploy`), ideally before Wed 2026-12-02 13:30 UTC.
 - **Next task:** P5a (Stage A of `notes/implementation-plan/P5-receptions-model.md`, rules frozen; branch `claude/p5a-receptions-stage-a`). Also the P1 live check after the first Friday and Sunday (P1 spec "Live check").
 - **Owner decisions (2026-11-24):** (a) yes: after the Wed 11-25 GB @ LA captures are checked, replace `williamhill_us` with `espnbet` unless it posted props, and `betus`/`mybookieag` with `fanatics`/`hardrockbet`, before Fri 11-27 21:00 UTC; (b) yes: add ~3 mid-week game-odds snapshots a week for P2's gate (~6 credits a week); (c) no: no historical prop odds are bought, so P5's market test (Stage B) uses only the 2026 archive.
 - **Weekly re-runs:** `src.topdown_replay` (pre-registered Phase 3 test; 34 of 100 flagged offers, 17 of 40 played games on 11-24), `src.topdown_v2` (frozen P2 gate on the evaluation sample from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24) and `src.props.topdown_props` after `git fetch origin odds-data` (frozen P4 gate; 0 of 150 offers, 0 of 30 games on 11-24). Descriptive only, never stop early for a pass. Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
@@ -28,10 +29,19 @@
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
 | P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | built 11-24 (`notes/p4-prop-scanner.md`); weekly re-run, gate pending |
-| Mid-week game-odds snapshots | owner decision (b), P2 spec owner question | approved 11-24, not built |
+| Mid-week game-odds snapshots | owner answer to the P2 owner question (11-24); `notes/midweek-snapshots.md` | built 11-24 (`claude/midweek-snapshots`); awaiting merge and Worker redeploy before Wed 12-02 13:30 UTC |
 | P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | spec written 11-24 (rules frozen); P5a after P4, P5b only after a Stage A pass |
 
 ## Log
+
+### 2026-11-24: mid-week game-odds snapshots built
+
+- Owner approved the P2 owner question: one extra game-odds snapshot on Wed/Thu/Sat from 17:30 UTC, about 2 credits each, so the P2 gate (80 offers on 35 games) can fill this season.
+- New `src/midweek_snapshot.py` and `midweek_snapshots.yml` (group `midweek-snapshots`, top-level `contents: read`, job `contents: write`, `ODDS_API_KEY` only, backup cron `47 17 * * 3,4,6`). Same request as `fetch_odds_api` (a test compares the params); files land in `odds-data` `snapshots/YYYY/MM/` via `push_odds_snapshots.sh` with `SNAP_DIR`, so `src.topdown_v2` reads them unchanged.
+- Self-gating: Wed/Thu/Sat, at or after 17:25 UTC, and no call if `odds-data` already holds any snapshot since 17:25 UTC today; ledger read before any paid call, nothing called if it fails.
+- Guards: 2 paid calls per run (second only retries network/429/5xx), quota floor 80 (as P1) read from the free `/events` call, one call while the quota is unknown. Weekly burn about 36 (spreads) + 30 (props) + 6 = 72.
+- Worker `SCHEDULE`: `midweek_snapshots.yml` appended to the `30 13,17,21 * * MON,WED,THU,FRI,SAT` entry; still 4 crons. Phase 3 `src.topdown_replay` also reads `snapshots/`, so it sees these too; no Phase 3 rule changed. No existing workflow, reader or request edited.
+- Tests: true iff `pytest tests/ -q` reports 1746 passed (31 new) and the Worker tests report 11 passed. No Odds API call was made locally. Owner: after merge, `cd external_trigger && npm run deploy`, ideally before Wed 12-02 13:30 UTC (the GitHub backup cron covers late days meanwhile).
 
 ### 2026-11-24: P4 top-down player_receptions scanner built
 
