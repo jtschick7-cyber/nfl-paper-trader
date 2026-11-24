@@ -20,7 +20,9 @@
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
-| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built 11-24 (`claude/p1-props-capture`), awaiting merge, Worker redeploy and probe |
+| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); awaiting Worker redeploy and probe |
+| P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | spec written 11-24 (rules frozen), not built |
+| P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | spec written 11-24, not built |
 
 ## Log
 
