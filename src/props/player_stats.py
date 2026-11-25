@@ -12,8 +12,12 @@ snap counts `pfr_player_id`, `player`, `team`, `game_id`, `offense_snaps`. Both 
 odds_utils.TEAM_ABBR_MAP. nfl_data_py is not used (and not upgraded).
 
 Matching: normalize_name plus team plus game. Props carry no team, so a name is resolved among
-the players of both teams in that game, in the stats rows and the snap-count rows.
+the players of both teams in that game, in the stats rows and the snap-count rows. Postseason
+rows (stats `season_type`, snaps `game_type` != "REG") are dropped first: the 2026 P2/P4 gates
+are regular-season only (owner, 2026-11-25).
 - No row of either kind for the game: `pending` (not graded, not listed; box score not out).
+- Rows of two different games for one (season, away, home): `ambiguous_game`, listed and left
+  ungraded; rows of two games are never summed.
 - No player with that name: `unmatched`. Two distinct players with that name in one source, or
   the two sources disagree on the team: `ambiguous`. Both are listed and left ungraded.
 - No snap-count row, or 0 offensive snaps: VOID, 0 units, excluded from W-L.
@@ -88,10 +92,19 @@ def _game_rows(df, season, away, home):
               & df["team"].isin([home, away])]
 
 
+def _regular_season(df, col):
+    """Regular-season rows only, when the type column is present (POST rows never reach grading)."""
+    if df is None or col not in df.columns:
+        return df
+    return df[df[col] == "REG"]
+
+
 def _resolve(name, st, sn, season_stats):
     """(status, receptions or None) for one normalized name in one game."""
     if st.empty and sn.empty:
         return "pending", None
+    if len(set(st["game_id"].astype(str)) | set(sn["game_id"].astype(str))) > 1:
+        return "ambiguous_game", None   # two games for one (season, away, home): never summed
     s = st[st["_n"] == name]
     k = sn[sn["_n"] == name]
     if s["player_id"].nunique() > 1 or k["pfr_player_id"].nunique() > 1:
@@ -112,10 +125,13 @@ def _resolve(name, st, sn, season_stats):
 def attach_results(df, stats, snaps):
     """(df with receptions, result, units, grade_status; unresolved list). `df` needs event_id,
     kickoff, home_team, away_team (nflverse codes), player (normalized), player_name, side, line, odds.
-    `unresolved` lists each (event, player) left ungraded as unmatched / ambiguous / no_stats_row."""
+    `unresolved` lists each (event, player) left ungraded as unmatched / ambiguous / ambiguous_game /
+    no_stats_row. Only regular-season rows are used when stats carry `season_type` and snaps `game_type`."""
     out = df.copy()
     if out.empty:
         return out.assign(receptions=np.nan, result=None, units=np.nan, grade_status=None), []
+    stats = _regular_season(stats, "season_type")
+    snaps = _regular_season(snaps, "game_type")
     stats = stats.assign(_n=[normalize_name(x) if isinstance(x, str) else None
                              for x in stats.get("player_display_name", pd.Series(dtype=object))])
     snaps = snaps.assign(_n=[normalize_name(x) if isinstance(x, str) else None
@@ -130,7 +146,7 @@ def attach_results(df, stats, snaps):
             sn = _game_rows(snaps, season, r.away_team, r.home_team)
             season_stats = stats[stats["game_id"].astype(str).str.startswith(f"{season}_")] if len(stats) else stats
             cache[key] = _resolve(r.player, st, sn, season_stats)
-            if cache[key][0] in ("unmatched", "ambiguous", "no_stats_row"):
+            if cache[key][0] in ("unmatched", "ambiguous", "ambiguous_game", "no_stats_row"):
                 unresolved.append({"event_id": r.event_id, "game": f"{r.away_team} @ {r.home_team}",
                                    "player": r.player, "player_name": r.player_name, "reason": cache[key][0]})
         st_, n = cache[key]

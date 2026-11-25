@@ -14,6 +14,7 @@ Approved by the owner on 2026-11-24, answering the owner question in `notes/impl
 - The Worker's `30 13,17,21 * * MON,WED,THU,FRI,SAT` entry dispatches it third, after `closing_line_monitor.yml` and `props_capture.yml`. Still 4 Cloudflare crons. Backup GitHub cron `47 17 * * 3,4,6`.
 - The job calls nothing unless it is Wed, Thu or Sat (UTC) and at or after 17:25 UTC (the 17:30 wake with 5 min of tolerance, or a later wake if that one failed). The 13:30 wake and Mon/Fri wakes exit at once.
 - At most one snapshot a day: before any paid call it fetches `origin/odds-data` and skips if any snapshot since 17:25 UTC today is archived (or in its local dir). A closing-loop snapshot in that window counts too, since it covers the same slate. If the ledger cannot be read, nothing is called (exit 1).
+- No game due, no call (added 2026-11-25): the free `/events` list must hold a game kicking off within 168 h, so the off-season and the week before the Super Bowl spend 0 credits. A non-list `/events` body exits 1 without a paid call.
 - Known gap: if the paid call succeeds but all three push attempts fail, the snapshot is lost and a later wake that day may pay again (at most 3 wakes a day).
 
 ## Credit guards

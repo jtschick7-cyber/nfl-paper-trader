@@ -103,6 +103,7 @@ Gate group as in report item 1.
 - **Pass:** ≥ 150 flagged offers on ≥ 30 games, mean `close_ev` > 0 by ≥ 2.0 game-clustered SE, **and** > 0 with the top 2 games removed, **and** the flagged side's mean `close_ev` above that side's all-offer mean from the drift check.
 - **Fail:** mean `close_ev` ≤ 0 once the sample reaches 150 offers on 30 games.
 - **Inconclusive:** neither once week 18 has settled. The rules carry unchanged into 2027.
+- **Scope clarification (owner, 2026-11-25, before any playoff data existed; no number or rule changed):** the sample is regular-season offers only. The final 2026 report runs on the `odds-data` tag `eval-2026-final`, set once week 18 settles, so playoff captures never enter the gate; grading drops postseason box-score rows (`src/props/player_stats.py`).
 - Weekly re-runs are descriptive only. Do not stop early for a pass.
 - **Sample:** about 15 games a week, about 15 players a game and 4 US books give roughly 900 US offers a week, so the size is reachable by week 18 if even 3% are flagged.
 - **Only after a pass:** a spec for live `Props_Ledger` / `Props_Scorecard` tabs (locked owner decision 3 in the brief).

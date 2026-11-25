@@ -35,17 +35,21 @@ class FakeResponse:
             raise ms.requests.HTTPError(f"{self.status_code} error")
 
 
+UPCOMING = [{"id": "g1", "commence_time": "2026-12-06T18:00:00Z"}]   # inside 168 h of WED, THU and SAT
+
+
 class FakeGet:
-    """Answers /events for free and /odds at `odds_cost` credits; odds statuses are scripted."""
+    """Answers /events for free (with `events`) and /odds at `odds_cost` credits; odds statuses are scripted."""
 
     def __init__(self, remaining=300, odds_cost=2, odds_statuses=None, quota_headers=True,
-                 payload=None):
+                 payload=None, events=None):
         self.calls = []
         self.remaining = remaining
         self.odds_cost = odds_cost
         self.odds_statuses = list(odds_statuses or [])
         self.quota_headers = quota_headers
         self.payload = payload if payload is not None else [{"id": "g1", "bookmakers": []}]
+        self.events = UPCOMING if events is None else events
 
     def _headers(self, last):
         if not self.quota_headers:
@@ -56,7 +60,7 @@ class FakeGet:
     def __call__(self, url, params=None, timeout=None):
         self.calls.append({"url": url, "params": dict(params or {})})
         if url.endswith("/events"):
-            return FakeResponse([], self._headers(0))
+            return FakeResponse(self.events, self._headers(0))
         status = self.odds_statuses.pop(0) if self.odds_statuses else 200
         if isinstance(status, Exception):
             raise status
@@ -276,7 +280,56 @@ def test_api_key_is_redacted_from_errors(tmp_path, monkeypatch, capsys):
     assert "KEY" not in capsys.readouterr().out.replace("apiKey", "")
 
 
-# 6. Readers see only snapshots/ ------------------------------------------------------
+# 6. No game due: no paid call (off-season, Pro Bowl week) -----------------------------
+
+def _ev(t):
+    return {"id": "g", "commence_time": t.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def test_has_upcoming_event_window():
+    now = WED
+    assert ms.HORIZON_HOURS == 168
+    assert ms.has_upcoming_event([_ev(now + timedelta(hours=167))], now)
+    assert ms.has_upcoming_event([_ev(now + timedelta(hours=168))], now)
+    assert not ms.has_upcoming_event([_ev(now + timedelta(hours=168, seconds=1))], now)
+    assert not ms.has_upcoming_event([_ev(now)], now)                       # already kicked off
+    assert not ms.has_upcoming_event([_ev(now - timedelta(hours=1))], now)
+    assert not ms.has_upcoming_event([], now)
+    assert not ms.has_upcoming_event(None, now)
+
+
+def test_has_upcoming_event_skips_malformed_entries():
+    now = WED
+    good = _ev(now + timedelta(days=2))
+    junk = [{"id": "x"}, {"commence_time": "not a time"}, {"commence_time": None}, "str", 7]
+    assert not ms.has_upcoming_event(junk, now)
+    assert ms.has_upcoming_event(junk + [good], now)
+
+
+def test_empty_events_makes_no_paid_call(tmp_path, monkeypatch, capsys):
+    code, get = run(WED, tmp_path, monkeypatch, get=FakeGet(events=[]))
+    assert code == 0 and get.odds_calls == [] and written(tmp_path) == []
+    assert "0 credits spent" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("delta", [timedelta(days=10), -timedelta(hours=1)])
+def test_only_far_or_past_events_make_no_paid_call(tmp_path, monkeypatch, delta):
+    code, get = run(WED, tmp_path, monkeypatch, get=FakeGet(events=[_ev(WED + delta)]))
+    assert code == 0 and get.odds_calls == [] and written(tmp_path) == []
+
+
+@pytest.mark.parametrize("hours", [144, 167])
+def test_event_inside_the_horizon_takes_the_snapshot(tmp_path, monkeypatch, hours):
+    code, get = run(WED, tmp_path, monkeypatch, get=FakeGet(events=[_ev(WED + timedelta(hours=hours))]))
+    assert code == 0 and len(get.odds_calls) == 1 and len(written(tmp_path)) == 1
+
+
+def test_non_list_events_fails_without_a_paid_call(tmp_path, monkeypatch):
+    code, get = run(WED, tmp_path, monkeypatch, get=FakeGet(events={"message": "odd"}))
+    assert code == 1 and get.odds_calls == [] and written(tmp_path) == []
+
+
+# 7. Readers see only snapshots/ ------------------------------------------------------
 
 def test_spread_readers_import_the_same_lister():
     from src import topdown_replay, topdown_v2

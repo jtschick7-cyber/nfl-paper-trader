@@ -270,6 +270,38 @@ def test_void_when_no_snap_row_and_pending_when_game_absent():
     assert out.iloc[0]["result"] is None and out.iloc[0]["grade_status"] == "pending" and not unresolved
 
 
+POST_GID = "2026_19_CHI_DET"   # a playoff rematch with the same home team
+
+
+def test_playoff_rematch_rows_are_not_added_to_the_regular_season_game():
+    stats = _stats([("p1", "Amon-Ra St. Brown", "DET", GID, 7),
+                    ("p1", "Amon-Ra St. Brown", "DET", POST_GID, 9)])
+    stats["season_type"] = ["REG", "POST"]
+    snaps = _snaps([("s1", "Amon-Ra St. Brown", "DET", GID, 60),
+                    ("s1", "Amon-Ra St. Brown", "DET", POST_GID, 55)])
+    snaps["game_type"] = ["REG", "POST"]
+    out, unresolved = ps.attach_results(_offers([("Amon-Ra St. Brown", "OVER", 7.5, 110)]), stats, snaps)
+    r = out.iloc[0]
+    assert r["grade_status"] == "graded" and r["receptions"] == 7     # never 7 + 9
+    assert r["result"] == "LOSS" and not unresolved
+
+
+def test_two_games_for_one_matchup_are_never_summed():
+    # without season-type columns, a second CHI @ DET game in the season makes the game ambiguous
+    stats = _stats([("p1", "Amon-Ra St. Brown", "DET", GID, 7),
+                    ("p1", "Amon-Ra St. Brown", "DET", POST_GID, 9)])
+    snaps = _snaps([("s1", "Amon-Ra St. Brown", "DET", GID, 60),
+                    ("s1", "Amon-Ra St. Brown", "DET", POST_GID, 55)])
+    out, unresolved = ps.attach_results(_offers([("Amon-Ra St. Brown", "OVER", 7.5, 110)]), stats, snaps)
+    r = out.iloc[0]
+    assert r["grade_status"] == "ambiguous_game" and r["result"] is None and math.isnan(r["receptions"])
+    assert [(u["player"], u["reason"]) for u in unresolved] == [("amon-ra st brown", "ambiguous_game")]
+    # only one source holding the second game is enough
+    out, unresolved = ps.attach_results(_offers([("Amon-Ra St. Brown", "OVER", 7.5, 110)]),
+                                        stats.iloc[:1], snaps)
+    assert out.iloc[0]["grade_status"] == "ambiguous_game" and unresolved
+
+
 def test_void_excluded_from_w_l():
     g = pd.DataFrame({"event_id": ["a", "a", "b"], "ev": [0.03] * 3, "close_ev": [0.01, -0.01, 0.02],
                       "close_ev_nb": [0.0] * 3, "close_ev_median": [0.0] * 3,
