@@ -100,6 +100,7 @@ On the evaluation sample, gate group as in report item 1:
 - **Pass:** ≥ 80 flagged offers on ≥ 35 games, mean `close_ev` > 0 by ≥ 2.0 game-clustered SE, **and** mean `close_ev` > 0 with the top 2 games removed.
 - **Fail:** mean `close_ev` ≤ 0 once the sample reaches 80 offers on 35 games.
 - **Inconclusive:** neither, once week 18 has settled. The rules carry unchanged into 2027, with no re-tuning.
+- **Scope clarification (owner, 2026-11-25, before any playoff data existed; no number or rule changed):** the evaluation sample is regular-season offers only. The final 2026 report runs with `--source eval-2026-final`, an `odds-data` tag set once week 18 settles, so playoff snapshots never enter the gate. `src/topdown_v2.py` is unchanged.
 - Weekly re-runs are descriptive only. Do not stop early for a pass.
 - Only after a pass: a spec for a live `TopDown_Shadow` tab (owner decision).
 

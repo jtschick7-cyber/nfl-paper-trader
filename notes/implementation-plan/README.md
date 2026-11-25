@@ -34,6 +34,7 @@ These follow from the review and from the owner saying "implement R1–R5 as rec
 2. `MIN_EDGE_THRESHOLD` stays at 0.02. β is changed only by the walk-forward fit, never by hand.
 3. v2/v3 shadow rows logged before 2026-11-03 00:00 UTC are legacy and excluded from any promotion sample.
 4. v1's model is not replaced and nothing is promoted this season.
+5. (Owner, 2026-11-25, recorded before any playoff data existed.) The 2026 P2 and P4 gates are regular-season only. After week 18 settles, the `odds-data` tip is tagged `eval-2026-final` and every final `--season-settled` report runs with `--source eval-2026-final`. Props capture and the mid-week snapshot stop after the last regular-season kickoff (follow-up PR); the closing loop is unchanged.
 
 ## Questions to put to the owner before the task that needs them
 

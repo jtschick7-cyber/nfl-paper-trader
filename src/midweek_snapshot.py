@@ -15,7 +15,9 @@ GitHub backup cron runs late):
     that wake failed);
   - at most one snapshot a day: no call if the odds-data archive or the local output dir holds
     any snapshot taken since 17:25 UTC today (a closing-loop snapshot then counts too);
-  - the ledger is read before any paid call; if it cannot be read, nothing is called.
+  - the ledger is read before any paid call; if it cannot be read, nothing is called;
+  - no call unless the free /events list holds a game kicking off within HORIZON_HOURS (168 h),
+    so the off-season and the week before the Super Bowl spend nothing.
 
 Credit guards: at most MAX_CALLS_PER_RUN paid calls (a second only to retry a network or 5xx
 error), and never below QUOTA_FLOOR remaining (the free /events call reports the quota; while
@@ -46,6 +48,7 @@ WINDOW_START_UTC = (17, 25)          # the 17:30 wake, with 5 min of clock toler
 MAX_CALLS_PER_RUN = int(os.getenv("MIDWEEK_MAX_CALLS", "2"))
 QUOTA_FLOOR = int(os.getenv("MIDWEEK_QUOTA_FLOOR", "80"))
 RETRY_SLEEP_SECONDS = 20
+HORIZON_HOURS = 168                  # a game must kick off within 7 days (Wed 17:30 -> Tue MNF is 128 h)
 
 API = f"https://api.the-odds-api.com/v4/sports/{SPORT_KEY}"
 _LOCAL_NAME = re.compile(r"^odds_(\d{8}T\d{6}Z)\.json$")
@@ -130,11 +133,30 @@ def _redact(text, api_key):
     return str(text).replace(api_key, "***") if api_key else str(text)
 
 
-def fetch_quota(api_key):
-    """Requests remaining from the free /events call (None if the header is absent). Raises on error."""
+def fetch_events_and_quota(api_key):
+    """(events, requests remaining) from the free /events call; remaining is None if the header is
+    absent. Raises on an HTTP error or a body that is not a list."""
     resp = requests.get(f"{API}/events", params={"apiKey": api_key, "dateFormat": "iso"}, timeout=30)
     resp.raise_for_status()
-    return _int_header(resp.headers, "x-requests-remaining")
+    events = resp.json()
+    if not isinstance(events, list):
+        raise ValueError("/events response is not a list")
+    return events, _int_header(resp.headers, "x-requests-remaining")
+
+
+def has_upcoming_event(events, now, horizon_hours=HORIZON_HOURS):
+    """True iff some event kicks off after `now` and within `horizon_hours`. Malformed entries are skipped."""
+    end = now + timedelta(hours=horizon_hours)
+    for ev in events or []:
+        try:
+            k = datetime.fromisoformat(str(ev["commence_time"]).replace("Z", "+00:00"))
+        except (TypeError, KeyError, ValueError):
+            continue
+        if k.tzinfo is None:
+            continue
+        if now < k <= end:
+            return True
+    return False
 
 
 def _block_reason(calls, remaining, quota_known, cost, max_calls, floor):
@@ -167,10 +189,13 @@ def run(*, api_key, now=None, out_dir=OUT_DIR, ledger_fn=refresh_ledger, sleep_f
         return 0
 
     try:
-        remaining = fetch_quota(api_key)
+        events, remaining = fetch_events_and_quota(api_key)
     except Exception as e:  # noqa: BLE001
         print(f"Quota check (/events) failed, calling nothing: {type(e).__name__}: {_redact(e, api_key)}")
         return 1
+    if not has_upcoming_event(events, now):
+        print(f"No NFL event kicks off within {HORIZON_HOURS} h; skipping mid-week snapshot (0 credits spent).")
+        return 0
     quota_known = remaining is not None
     cost = estimated_cost()
     url, params = odds_request(api_key)
