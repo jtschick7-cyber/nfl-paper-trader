@@ -17,7 +17,12 @@ GitHub backup cron runs late):
     any snapshot taken since 17:25 UTC today (a closing-loop snapshot then counts too);
   - the ledger is read before any paid call; if it cannot be read, nothing is called;
   - no call unless the free /events list holds a game kicking off within HORIZON_HOURS (168 h),
-    so the off-season and the week before the Super Bowl spend nothing.
+    so the off-season and the week before the Super Bowl spend nothing;
+  - only regular-season games count (owner decision 5, src/regular_season.py): September-
+    December kickoffs always count and never need the schedule; January-August kickoffs count
+    only inside their season's regular-season window from nflverse games.csv, so playoff and
+    preseason weeks spend nothing. If no game counts and a January-August event was skipped for
+    want of a readable schedule (or of its season in it), nothing is called and the run exits 1.
 
 Credit guards: at most MAX_CALLS_PER_RUN paid calls (a second only to retry a network or 5xx
 error), and never below QUOTA_FLOOR remaining (the free /events call reports the quota; while
@@ -39,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from src import regular_season
 from src.config import MARKETS, REGIONS, SPORT_KEY
 from src.load_odds_archive import DEFAULT_REF, list_snapshots, snapshot_time
 
@@ -144,9 +150,14 @@ def fetch_events_and_quota(api_key):
     return events, _int_header(resp.headers, "x-requests-remaining")
 
 
-def has_upcoming_event(events, now, horizon_hours=HORIZON_HOURS):
-    """True iff some event kicks off after `now` and within `horizon_hours`. Malformed entries are skipped."""
+def has_upcoming_event(events, now, horizon_hours=HORIZON_HOURS, *, cutoffs, skipped=None):
+    """True iff some regular-season event kicks off after `now` and within `horizon_hours`.
+
+    Malformed entries are skipped. `cutoffs` is a regular_season.LazyCutoffs or a {season: Window}
+    table; events inside the horizon that it rules out are appended to `skipped` (if given) as
+    (kickoff, reason)."""
     end = now + timedelta(hours=horizon_hours)
+    found = False
     for ev in events or []:
         try:
             k = datetime.fromisoformat(str(ev["commence_time"]).replace("Z", "+00:00"))
@@ -155,8 +166,12 @@ def has_upcoming_event(events, now, horizon_hours=HORIZON_HOURS):
         if k.tzinfo is None:
             continue
         if now < k <= end:
-            return True
-    return False
+            reason = regular_season.skip_reason(k, cutoffs)
+            if reason is None:
+                found = True
+            elif skipped is not None:
+                skipped.append((k, reason))
+    return found
 
 
 def _block_reason(calls, remaining, quota_known, cost, max_calls, floor):
@@ -170,7 +185,8 @@ def _block_reason(calls, remaining, quota_known, cost, max_calls, floor):
 
 
 def run(*, api_key, now=None, out_dir=OUT_DIR, ledger_fn=refresh_ledger, sleep_fn=time.sleep,
-        now_fn=_utcnow, max_calls=MAX_CALLS_PER_RUN, floor=QUOTA_FLOOR):
+        now_fn=_utcnow, max_calls=MAX_CALLS_PER_RUN, floor=QUOTA_FLOOR,
+        cutoffs_fn=regular_season.load_reg_cutoffs):
     """Takes today's snapshot if it is due and allowed. Returns the process exit code."""
     given = now
     now = now or now_fn()
@@ -188,13 +204,22 @@ def run(*, api_key, now=None, out_dir=OUT_DIR, ledger_fn=refresh_ledger, sleep_f
         print(f"A snapshot since {window_start(now):%H:%M} UTC today is already archived; nothing to do.")
         return 0
 
+    cutoffs = regular_season.LazyCutoffs(cutoffs_fn)   # loaded only for a Jan-Aug event
+
     try:
         events, remaining = fetch_events_and_quota(api_key)
     except Exception as e:  # noqa: BLE001
         print(f"Quota check (/events) failed, calling nothing: {type(e).__name__}: {_redact(e, api_key)}")
         return 1
-    if not has_upcoming_event(events, now):
-        print(f"No NFL event kicks off within {HORIZON_HOURS} h; skipping mid-week snapshot (0 credits spent).")
+    skipped = []
+    if not has_upcoming_event(events, now, cutoffs=cutoffs, skipped=skipped):
+        missing = sorted({r for _, r in skipped if regular_season.is_fail_closed(r)})
+        if missing:
+            print(f"Not taking the mid-week snapshot: {'; '.join(missing)} (0 credits spent).")
+            return 1
+        why = f" ({skipped[0][1]})" if skipped else ""
+        print(f"No regular-season NFL event kicks off within {HORIZON_HOURS} h{why}; "
+              f"skipping mid-week snapshot (0 credits spent).")
         return 0
     quota_known = remaining is not None
     cost = estimated_cost()

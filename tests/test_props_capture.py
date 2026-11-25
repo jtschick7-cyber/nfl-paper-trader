@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.props import capture_props as cp
+from src.regular_season import ScheduleUnavailable, Window
 
 
 def utc(*args):
@@ -16,6 +17,12 @@ def utc(*args):
 
 def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Last 2026 regular-season kickoff (week 18, nflverse placeholder 13:00 ET).
+LAST_REG_2026 = utc(2027, 1, 10, 18, 0)
+FIRST_REG_2026 = utc(2026, 9, 11, 0, 20)
+CUTOFFS = {2026: Window(FIRST_REG_2026, LAST_REG_2026)}
 
 
 def event(eid, kickoff):
@@ -86,7 +93,7 @@ K = utc(2026, 11, 29, 18, 0)
 
 
 def _due(now, ledger=frozenset()):
-    return {(d["phase"], d["event_id"]) for d in cp.due_items([event("ev1", K)], set(ledger), now)}
+    return {(d["phase"], d["event_id"]) for d in cp.due_items([event("ev1", K)], set(ledger), now, cutoffs=CUTOFFS)}
 
 
 def test_open_due_until_two_hours_before_kickoff():
@@ -118,21 +125,21 @@ def test_next_wake_is_earliest_future_target_within_deadline():
     events = [event("sun", K), event("snf", utc(2026, 11, 30, 1, 20))]
     now = utc(2026, 11, 27, 17, 30)
     deadline = now + timedelta(minutes=320)
-    assert cp.next_wake(events, set(), now, deadline) == utc(2026, 11, 27, 21, 0)
+    assert cp.next_wake(events, set(), now, deadline, cutoffs=CUTOFFS) == utc(2026, 11, 27, 21, 0)
 
 
 def test_next_wake_skips_targets_already_in_ledger():
     events = [event("sun", K)]
     now = utc(2026, 11, 29, 15, 30)
     deadline = now + timedelta(minutes=320)
-    assert cp.next_wake(events, {("open", "sun")}, now, deadline) == K - timedelta(minutes=25)
-    assert cp.next_wake(events, {("open", "sun"), ("close", "sun")}, now, deadline) is None
+    assert cp.next_wake(events, {("open", "sun")}, now, deadline, cutoffs=CUTOFFS) == K - timedelta(minutes=25)
+    assert cp.next_wake(events, {("open", "sun"), ("close", "sun")}, now, deadline, cutoffs=CUTOFFS) is None
 
 
 def test_next_wake_none_when_no_target_fits_before_deadline():
     events = [event("sun", K)]
     now = utc(2026, 11, 27, 13, 30)
-    assert cp.next_wake(events, set(), now, now + timedelta(minutes=320)) is None
+    assert cp.next_wake(events, set(), now, now + timedelta(minutes=320), cutoffs=CUTOFFS) is None
 
 
 # 4. Ledger ---------------------------------------------------------------------------
@@ -156,9 +163,9 @@ def test_ledger_from_archive_and_local_files(tmp_path):
     assert ledger == {("open", "evA"), ("open", "evB"), ("probe", "evC")}
 
     events = [event("evA", K), event("evB", K), event("evC", K)]
-    at_open = {(d["phase"], d["event_id"]) for d in cp.due_items(events, ledger, utc(2026, 11, 27, 21, 1))}
+    at_open = {(d["phase"], d["event_id"]) for d in cp.due_items(events, ledger, utc(2026, 11, 27, 21, 1), cutoffs=CUTOFFS)}
     assert at_open == {("open", "evC")}  # a probe file does not count as the open
-    at_close = {(d["phase"], d["event_id"]) for d in cp.due_items(events, ledger, K - timedelta(minutes=25))}
+    at_close = {(d["phase"], d["event_id"]) for d in cp.due_items(events, ledger, K - timedelta(minutes=25), cutoffs=CUTOFFS)}
     assert at_close == {("close", "evA"), ("close", "evB"), ("close", "evC")}
 
 
@@ -332,7 +339,7 @@ def test_loop_captures_open_then_sleeps_to_next_target_then_exits(tmp_path, monk
 
     code = cp.run_loop(api_key="KEY", out_dir=str(out), now_fn=clock.now, sleep_fn=clock.sleep,
                        ledger_fn=lambda: cp.load_ledger(str(archive), str(out)),
-                       push_fn=lambda: pushes.append(1))
+                       push_fn=lambda: pushes.append(1), cutoffs_fn=lambda: CUTOFFS)
 
     assert code == 0
     phases = sorted(n.split("_")[1] for n in os.listdir(out))
@@ -347,7 +354,8 @@ def test_loop_exits_red_when_events_call_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(cp.requests, "get", _events_get([], odds, events_status=500))
     clock = Clock(utc(2026, 11, 29, 14, 0))
     code = cp.run_loop(api_key="KEY", out_dir=str(tmp_path), now_fn=clock.now, sleep_fn=clock.sleep,
-                       ledger_fn=lambda: set(), push_fn=lambda: None)
+                       ledger_fn=lambda: set(), push_fn=lambda: None,
+                       cutoffs_fn=lambda: CUTOFFS)
     assert code == 1 and odds.calls == []
 
 
@@ -357,10 +365,108 @@ def test_probe_captures_earliest_event_once(tmp_path, monkeypatch):
     monkeypatch.setattr(cp.requests, "get", _events_get(events, odds))
     clock = Clock(utc(2026, 11, 25, 12, 0))
     code = cp.run_loop(probe=True, api_key="KEY", out_dir=str(tmp_path), now_fn=clock.now,
-                       sleep_fn=clock.sleep, ledger_fn=lambda: set(), push_fn=lambda: None)
+                       sleep_fn=clock.sleep, ledger_fn=lambda: set(), push_fn=lambda: None,
+                       cutoffs_fn=lambda: CUTOFFS)
     assert code == 0
     assert [c["url"].split("/")[-2] for c in odds.calls] == ["first"]
     (name,) = os.listdir(tmp_path)
     assert name.startswith("props_probe_first_")
     with open(tmp_path / name) as f:
         assert json.load(f)["phase"] == "probe"
+
+
+# 8. Regular season only (owner decision 5) ------------------------------------------
+
+WILD_CARD = utc(2027, 1, 16, 21, 30)   # first playoff Saturday after the 2026 week 18
+W18_2027 = utc(2028, 1, 9, 18, 0)      # 2027 week 18: needs the 2027 schedule
+WITH_2027 = {**CUTOFFS, 2027: Window(utc(2027, 9, 10, 0, 20), W18_2027)}
+
+
+def no_schedule():
+    raise ScheduleUnavailable("data/nflverse_cache/games.csv not found")
+
+
+def _due_at(events, now, cutoffs=CUTOFFS):
+    return {(d["phase"], d["event_id"]) for d in cp.due_items(events, set(), now, cutoffs=cutoffs)}
+
+
+def _loop(events, now, tmp_path, monkeypatch, cutoffs_fn=lambda: CUTOFFS, probe=False):
+    odds = FakeGet(remaining=400)
+    monkeypatch.setattr(cp.requests, "get", _events_get(events, odds))
+    clock = Clock(now)
+    code = cp.run_loop(probe=probe, api_key="KEY", out_dir=str(tmp_path / "out"), now_fn=clock.now,
+                       sleep_fn=clock.sleep, ledger_fn=lambda: set(), push_fn=lambda: None,
+                       cutoffs_fn=cutoffs_fn, max_minutes=10)
+    return code, odds
+
+
+def test_playoff_event_is_never_due_or_targeted():
+    events = [event("wc", WILD_CARD)]
+    assert _due_at(events, WILD_CARD - timedelta(minutes=25)) == set()
+    assert _due_at(events, WILD_CARD - timedelta(hours=3)) == set()
+    assert cp.upcoming(events, WILD_CARD - timedelta(days=2), cutoffs=CUTOFFS) == []
+    now = WILD_CARD - timedelta(hours=5)
+    assert cp.next_wake(events, set(), now, now + timedelta(hours=6), cutoffs=CUTOFFS) is None
+
+
+def test_last_regular_season_game_is_still_captured():
+    events = [event("w18", LAST_REG_2026), event("wc", WILD_CARD)]
+    assert _due_at(events, LAST_REG_2026 - timedelta(minutes=25)) == {("close", "w18")}
+    assert _due_at(events, LAST_REG_2026 - timedelta(hours=3)) == {("open", "w18")}
+
+
+def test_week_18_inside_the_grace_window_is_captured(tmp_path, monkeypatch):
+    # nflverse lists week 18 at 13:00 ET until flex; the SNF game comes 7 h 20 m later
+    snf = LAST_REG_2026 + timedelta(hours=7, minutes=20)
+    assert _due_at([event("snf", snf)], snf - timedelta(minutes=25)) == {("close", "snf")}
+    code, odds = _loop([event("snf", snf)], snf - timedelta(minutes=30), tmp_path, monkeypatch)
+    assert code == 0 and len(odds.calls) == 1
+
+
+def test_2027_event_allowed_once_its_schedule_is_present():
+    events = [event("w18", W18_2027)]
+    now = W18_2027 - timedelta(minutes=25)
+    assert _due_at(events, now) == set()                         # 2027 schedule not yet in games.csv
+    assert _due_at(events, now, WITH_2027) == {("close", "w18")}
+    sep = utc(2027, 9, 12, 17, 0)                                # Sep-Dec needs no schedule
+    assert _due_at([event("w1", sep)], sep - timedelta(minutes=25)) == {("close", "w1")}
+
+
+def test_loop_spends_nothing_on_playoff_events(tmp_path, monkeypatch, capsys):
+    code, odds = _loop([event("wc", WILD_CARD)], WILD_CARD - timedelta(minutes=30), tmp_path, monkeypatch)
+    assert code == 0 and odds.calls == [] and not (tmp_path / "out").exists()
+    assert "after the 2026 regular season" in capsys.readouterr().out
+
+
+def test_december_kickoff_is_captured_without_a_schedule(tmp_path, monkeypatch):
+    k = utc(2026, 12, 6, 18, 0)
+    code, odds = _loop([event("dec", k)], k - timedelta(minutes=30), tmp_path, monkeypatch,
+                       cutoffs_fn=no_schedule)
+    assert code == 0 and len(odds.calls) == 1
+
+
+def test_january_playoff_kickoff_fails_closed_without_a_schedule(tmp_path, monkeypatch, capsys):
+    code, odds = _loop([event("wc", WILD_CARD)], WILD_CARD - timedelta(minutes=30), tmp_path, monkeypatch,
+                       cutoffs_fn=no_schedule)
+    assert code == 1 and odds.calls == []
+    assert "games.csv not found" in capsys.readouterr().out
+
+
+def test_season_missing_from_schedule_fails_closed(tmp_path, monkeypatch, capsys):
+    code, odds = _loop([event("w18", W18_2027)], W18_2027 - timedelta(minutes=30), tmp_path, monkeypatch)
+    assert code == 1 and odds.calls == []
+    assert "no regular-season schedule for 2027" in capsys.readouterr().out
+
+
+def test_august_preseason_is_skipped(tmp_path, monkeypatch, capsys):
+    k = utc(2027, 8, 27, 0, 0)
+    code, odds = _loop([event("pre", k)], k - timedelta(minutes=30), tmp_path, monkeypatch,
+                       cutoffs_fn=lambda: WITH_2027)
+    assert code == 0 and odds.calls == []
+    assert "before the 2027 regular season" in capsys.readouterr().out
+
+
+def test_probe_skips_playoff_events(tmp_path, monkeypatch):
+    code, odds = _loop([event("wc", WILD_CARD)], WILD_CARD - timedelta(days=2), tmp_path, monkeypatch,
+                       probe=True)
+    assert code == 1 and odds.calls == []

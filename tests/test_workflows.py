@@ -94,3 +94,13 @@ def test_midweek_snapshots_runs_alone_with_odds_key_only():
     assert "SNAP_DIR: data/midweek_cache/snapshots" in text
     push = [s for s in job["steps"] if "push_odds_snapshots" in s.get("run", "")][0]
     assert push["if"] == "always()"
+
+
+def test_schedule_is_downloaded_before_props_and_midweek_capture():
+    # games.csv is not in the repo; the regular-season cutoff (owner decision 5) needs it.
+    for name, job, capture in [("props_capture.yml", "capture", "src.props.capture_props"),
+                               ("midweek_snapshots.yml", "snapshot", "src.midweek_snapshot")]:
+        runs = [s.get("run", "") for s in _load(name)["jobs"][job]["steps"]]
+        fetch = [i for i, r in enumerate(runs) if "python -m src.regular_season --fetch" in r]
+        cap = [i for i, r in enumerate(runs) if capture in r]
+        assert len(fetch) == 1 and cap and fetch[0] < cap[0], name

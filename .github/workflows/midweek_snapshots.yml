@@ -44,6 +44,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # The regular-season filter (src/regular_season.py, owner decision 5) reads nflverse
+      # games.csv, which is not in the repo, for January-August kickoffs only. This step never
+      # fails: Sep-Dec games count without the file; Jan-Aug games are skipped (exit 1) without it.
+      - name: Download nflverse schedule
+        run: python -m src.regular_season --fetch
+
       - name: Take mid-week game-odds snapshot
         run: python -m src.midweek_snapshot
 
