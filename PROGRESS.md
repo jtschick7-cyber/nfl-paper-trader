@@ -2,11 +2,11 @@
 
 ## Current state
 
-- **Branch:** `claude/hardening-nov25` (hardening PR open, waits for owner merge). PRs #14–#34 are merged on `main`.
-- **Last task:** Nov 25 audit hardening: prop grading never sums a playoff rematch into a regular-season game; the mid-week snapshot spends nothing when no game kicks off within 168 h; `props_capture.yml` uses a shallow checkout. Before that, P5a Stage A: **FAIL**, Step 5 closed.
+- **Branch:** `claude/regular-season-cutoff` (PR open, waits for owner merge). PRs #14–#35 are merged on `main`.
+- **Last task:** regular-season cutoff: props capture and mid-week snapshots skip any event after its season's last REG kickoff (`src/regular_season.py`, nflverse `games.csv`, 24 h grace), and fail closed without a schedule. Before that, Nov 25 audit hardening: prop grading never sums a playoff rematch into a regular-season game; the mid-week snapshot spends nothing when no game kicks off within 168 h; `props_capture.yml` uses a shallow checkout. Before that, P5a Stage A: **FAIL**, Step 5 closed.
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
 - **Mid-week snapshots:** merged (PR #33). Worker redeploy (`cd external_trigger && npm run deploy`) recommended before Wed 2026-11-25 17:30 UTC; until then only the GitHub backup cron runs the job.
-- **Owner decision (2026-11-25):** the 2026 P2/P4 gates are regular-season only; final reports run on the `odds-data` tag `eval-2026-final` set at week-18 settle (`notes/implementation-plan/README.md` decision 5). Follow-up PR: props capture and mid-week snapshots stop after the last regular-season kickoff (from `games.csv`). Prop book swap (`betus`→`fanatics`, `mybookieag`→`hardrockbet`, `williamhill_us`→`espnbet`) after the GB @ LA captures, before Thu 11-26 13:30 UTC.
+- **Owner decision (2026-11-25):** the 2026 P2/P4 gates are regular-season only; final reports run on the `odds-data` tag `eval-2026-final` set at week-18 settle (`notes/implementation-plan/README.md` decision 5). Props capture and mid-week snapshots now stop after the last regular-season kickoff (2026: 2027-01-10 18:00 UTC placeholder, plus 24 h grace), once this PR merges. Prop book swap (`betus`→`fanatics`, `mybookieag`→`hardrockbet`, `williamhill_us`→`espnbet`) after the GB @ LA captures, before Thu 11-26 13:30 UTC.
 - **Next task:** Step 5 is closed (P5a FAIL), so there is no P5b. Next is the P1 live check after the first Friday and Sunday (P1 spec "Live check"), and the owner's next roadmap item.
 - **Owner decisions (2026-11-24):** (a) yes: after the Wed 11-25 GB @ LA captures are checked, replace `williamhill_us` with `espnbet` unless it posted props, and `betus`/`mybookieag` with `fanatics`/`hardrockbet`, before Fri 11-27 21:00 UTC; (b) yes: add ~3 mid-week game-odds snapshots a week for P2's gate (~6 credits a week); (c) no: no historical prop odds are bought, so P5's market test (Stage B) uses only the 2026 archive.
 - **Weekly re-runs:** `src.topdown_replay` (pre-registered Phase 3 test; 34 of 100 flagged offers, 17 of 40 played games on 11-24), `src.topdown_v2` (frozen P2 gate on the evaluation sample from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24) and `src.props.topdown_props` after `git fetch origin odds-data` (frozen P4 gate; 0 of 150 offers, 0 of 30 games on 11-24). Descriptive only, never stop early for a pass. Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
@@ -34,6 +34,16 @@
 | P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | P5a done 11-24: Stage A **FAIL** on calibration (`notes/p5a-receptions-stage-a.md`); Step 5 closed, no P5b |
 
 ## Log
+
+### 2026-11-25: regular-season cutoff for props capture and mid-week snapshots
+
+- New `src/regular_season.py`: the cutoff per season is the latest `game_type == REG` kickoff in `data/nflverse_cache/games.csv` (ET gametime to UTC); season = year if month >= 3 else year - 1, so 2027 switches on once `games.csv` holds its schedule.
+- 24 h grace after the cutoff: nflverse lists week 18 at a 13:00 ET placeholder until flex, so a week-18 SNF still counts; wild card is always >= 5 days later.
+- `capture_props.upcoming()` / `due_items()` / `next_wake()` take `cutoffs`; skipped events are logged once per run. `midweek_snapshot.has_upcoming_event()` counts REG games only.
+- Fail closed: no readable `games.csv` means 0 credits and exit 1; a season missing from it also means exit 1. Playoff skips exit 0.
+- `props_capture.yml` and `midweek_snapshots.yml` gain a `python -m src.regular_season --fetch` step (`games.csv` is gitignored); the step never fails.
+- No frozen file, model, Sheet or Odds API touched.
+- Tests: true iff `pytest tests/ -q` reports 1853 passed (20 new) and the Worker tests report 11 passed.
 
 ### 2026-11-25: Nov 25 audit hardening (Fixes 1, 2, 4)
 

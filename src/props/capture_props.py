@@ -9,6 +9,10 @@ The game list comes from the free /events endpoint. The archive plus local files
 so a late or duplicate run catches up and never pays twice for the same (phase, event). Like
 src/closing_loop.py, one run stays alive and sleeps to its next target within the deadline.
 
+Regular season only (owner decision 5): an event kicking off after its season's last
+regular-season kickoff (src/regular_season.py, nflverse games.csv) is never captured. Without a
+readable schedule, or for a season it does not hold, nothing is captured and the run exits 1.
+
 Credit guards (checked before every call): at most MAX_CREDITS_PER_RUN per run, earliest kickoffs
 first; never below QUOTA_FLOOR remaining; while the quota is unknown, at most one call.
 
@@ -26,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from src import regular_season
 from src.props import PROPS_CACHE_DIR
 from src.props.load_prop_archive import DEFAULT_REF, list_prop_snapshots, parse_prop_name
 
@@ -87,8 +92,11 @@ def _close_due(k, now):
     return k - timedelta(minutes=CLOSE_WINDOW_MIN[0]) <= now <= k - timedelta(minutes=CLOSE_WINDOW_MIN[1])
 
 
-def upcoming(events, now):
-    """[(kickoff, event_id)] for events kicking off after now and within the horizon."""
+def upcoming(events, now, *, cutoffs, skipped=None):
+    """[(kickoff, event_id)] for regular-season events kicking off after now and within the horizon.
+
+    `cutoffs` is regular_season.load_reg_cutoffs(); events it rules out are appended to `skipped`
+    (if given) as (kickoff, event_id, reason)."""
     out = []
     for ev in events or []:
         eid = str(ev.get("id", ""))
@@ -100,14 +108,19 @@ def upcoming(events, now):
         except (KeyError, ValueError):
             continue
         if now < k <= now + timedelta(days=HORIZON_DAYS):
+            reason = regular_season.skip_reason(k, cutoffs)
+            if reason:
+                if skipped is not None:
+                    skipped.append((k, eid, reason))
+                continue
             out.append((k, eid))
     return sorted(out)
 
 
-def due_items(events, ledger, now):
+def due_items(events, ledger, now, *, cutoffs):
     """Captures due now and not yet in the ledger: [{phase, event_id, kickoff, target_at}]."""
     items = []
-    for k, eid in upcoming(events, now):
+    for k, eid in upcoming(events, now, cutoffs=cutoffs):
         if ("open", eid) not in ledger and _open_due(k, now):
             items.append({"phase": "open", "event_id": eid, "kickoff": k, "target_at": open_target(k)})
         if ("close", eid) not in ledger and _close_due(k, now):
@@ -115,11 +128,11 @@ def due_items(events, ledger, now):
     return items
 
 
-def next_wake(events, ledger, now, deadline):
+def next_wake(events, ledger, now, deadline, *, cutoffs):
     """Earliest future open/close target not yet captured and no later than the deadline, else None."""
     earliest = now + timedelta(seconds=MIN_SLEEP_SECONDS)
     targets = []
-    for k, eid in upcoming(events, now):
+    for k, eid in upcoming(events, now, cutoffs=cutoffs):
         if ("open", eid) not in ledger:
             targets.append(open_target(k))
         if ("close", eid) not in ledger:
@@ -293,14 +306,32 @@ def capture_items(items, budget, api_key, out_dir, now):
 
 def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, sleep_fn=time.sleep,
              ledger_fn=None, push_fn=push_snapshots, max_minutes=MAX_RUNTIME_MINUTES,
-             cap=MAX_CREDITS_PER_RUN, floor=QUOTA_FLOOR):
-    """Returns the process exit code: 1 if any events/ledger read or capture failed, or a due
-    capture was skipped by a credit guard."""
+             cap=MAX_CREDITS_PER_RUN, floor=QUOTA_FLOOR, cutoffs_fn=regular_season.load_reg_cutoffs):
+    """Returns the process exit code: 1 if the schedule, events or ledger read or a capture failed,
+    a due capture was skipped by a credit guard, or an event's season has no schedule."""
+    try:
+        cutoffs = cutoffs_fn()
+    except regular_season.ScheduleUnavailable as e:
+        print(f"Regular-season schedule unavailable ({e}); capturing nothing (0 credits spent).")
+        return 1
     ledger_fn = ledger_fn or (lambda: refresh_ledger(out_dir))
     start = now_fn()
     deadline = start + timedelta(minutes=max_minutes)
     budget = CreditBudget(cap, floor)
     events, failed = None, False
+    reported = set()
+
+    def season_filter(events, now):
+        """upcoming() that reports each skipped event once; a season without a schedule fails."""
+        nonlocal failed
+        skipped = []
+        ups = upcoming(events, now, cutoffs=cutoffs, skipped=skipped)
+        for k, eid, reason in skipped:
+            if eid not in reported:
+                reported.add(eid)
+                print(f"Not capturing {eid} (kickoff {_iso(k)}): {reason}.")
+            failed = failed or regular_season.is_missing_season(reason)
+        return ups
 
     while True:
         now = now_fn()
@@ -313,7 +344,7 @@ def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, s
             return 1
 
         if probe:
-            ups = upcoming(events, now)
+            ups = season_filter(events, now)
             if not ups:
                 print("Probe: no upcoming event.")
                 return 1
@@ -330,7 +361,8 @@ def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, s
             print(f"Ledger read failed, capturing nothing this wake: {type(e).__name__}: {e}")
             failed, ledger, items = True, None, []
         else:
-            items = due_items(events, ledger, now)
+            season_filter(events, now)
+            items = due_items(events, ledger, now, cutoffs=cutoffs)
 
         if items:
             written, skipped = capture_items(items, budget, api_key, out_dir, now)
@@ -343,7 +375,8 @@ def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, s
             print(f"No further captures allowed this run ({blocked}). Spent {budget.spent} credit(s). Exiting.")
             return 1 if failed else 0
 
-        wake = next_wake(events, ledger if ledger is not None else set(), now_fn(), deadline)
+        wake = next_wake(events, ledger if ledger is not None else set(), now_fn(), deadline,
+                         cutoffs=cutoffs)
         if wake is None:
             print(f"No prop targets before the runtime deadline. Spent {budget.spent} credit(s). Exiting.")
             return 1 if failed else 0

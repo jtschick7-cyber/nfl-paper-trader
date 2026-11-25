@@ -50,6 +50,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # The regular-season cutoff (src/regular_season.py, owner decision 5) reads nflverse
+      # games.csv, which is not in the repo. This step never fails; if the schedule is still
+      # missing, the next step spends nothing and exits 1.
+      - name: Download nflverse schedule
+        run: python -m src.regular_season --fetch
+
       - name: Capture player_receptions snapshots
         env:
           PROBE: ${{ inputs.probe }}
