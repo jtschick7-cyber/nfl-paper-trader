@@ -9,9 +9,11 @@ The game list comes from the free /events endpoint. The archive plus local files
 so a late or duplicate run catches up and never pays twice for the same (phase, event). Like
 src/closing_loop.py, one run stays alive and sleeps to its next target within the deadline.
 
-Regular season only (owner decision 5): an event kicking off after its season's last
-regular-season kickoff (src/regular_season.py, nflverse games.csv) is never captured. Without a
-readable schedule, or for a season it does not hold, nothing is captured and the run exits 1.
+Regular season only (owner decision 5, src/regular_season.py): September-December kickoffs
+always count and never need the schedule. January-August kickoffs count only inside their
+season's regular-season window from nflverse games.csv, so playoff and preseason games are never
+captured; without a readable schedule, or for a season it does not hold, those events are not
+captured and the run exits 1.
 
 Credit guards (checked before every call): at most MAX_CREDITS_PER_RUN per run, earliest kickoffs
 first; never below QUOTA_FLOOR remaining; while the quota is unknown, at most one call.
@@ -95,8 +97,8 @@ def _close_due(k, now):
 def upcoming(events, now, *, cutoffs, skipped=None):
     """[(kickoff, event_id)] for regular-season events kicking off after now and within the horizon.
 
-    `cutoffs` is regular_season.load_reg_cutoffs(); events it rules out are appended to `skipped`
-    (if given) as (kickoff, event_id, reason)."""
+    `cutoffs` is a regular_season.LazyCutoffs or a {season: Window} table; events it rules out
+    are appended to `skipped` (if given) as (kickoff, event_id, reason)."""
     out = []
     for ev in events or []:
         eid = str(ev.get("id", ""))
@@ -307,13 +309,9 @@ def capture_items(items, budget, api_key, out_dir, now):
 def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, sleep_fn=time.sleep,
              ledger_fn=None, push_fn=push_snapshots, max_minutes=MAX_RUNTIME_MINUTES,
              cap=MAX_CREDITS_PER_RUN, floor=QUOTA_FLOOR, cutoffs_fn=regular_season.load_reg_cutoffs):
-    """Returns the process exit code: 1 if the schedule, events or ledger read or a capture failed,
-    a due capture was skipped by a credit guard, or an event's season has no schedule."""
-    try:
-        cutoffs = cutoffs_fn()
-    except regular_season.ScheduleUnavailable as e:
-        print(f"Regular-season schedule unavailable ({e}); capturing nothing (0 credits spent).")
-        return 1
+    """Returns the process exit code: 1 if any events/ledger read or capture failed, a due capture
+    was skipped by a credit guard, or a January-August event was skipped for want of a schedule."""
+    cutoffs = regular_season.LazyCutoffs(cutoffs_fn)   # loaded only for a Jan-Aug event
     ledger_fn = ledger_fn or (lambda: refresh_ledger(out_dir))
     start = now_fn()
     deadline = start + timedelta(minutes=max_minutes)
@@ -322,15 +320,16 @@ def run_loop(probe=False, *, api_key, out_dir=PROPS_CACHE_DIR, now_fn=_utcnow, s
     reported = set()
 
     def season_filter(events, now):
-        """upcoming() that reports each skipped event once; a season without a schedule fails."""
+        """upcoming() that reports each skipped event once; a skip for want of a schedule fails."""
         nonlocal failed
         skipped = []
         ups = upcoming(events, now, cutoffs=cutoffs, skipped=skipped)
         for k, eid, reason in skipped:
             if eid not in reported:
                 reported.add(eid)
-                print(f"Not capturing {eid} (kickoff {_iso(k)}): {reason}.")
-            failed = failed or regular_season.is_missing_season(reason)
+                print(f"Not capturing {eid} (kickoff {_iso(k)}): {reason}"
+                      + (" (0 credits spent)." if regular_season.is_fail_closed(reason) else "."))
+            failed = failed or regular_season.is_fail_closed(reason)
         return ups
 
     while True:

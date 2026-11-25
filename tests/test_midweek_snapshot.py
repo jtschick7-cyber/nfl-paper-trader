@@ -8,6 +8,7 @@ from src import midweek_snapshot as ms
 from src import odds_utils
 from src.archive_snapshots import archive_path, archive_snapshots
 from src.load_odds_archive import iter_archive, snapshot_time
+from src.regular_season import ScheduleUnavailable, Window
 
 
 def utc(*args):
@@ -36,7 +37,8 @@ class FakeResponse:
 
 
 LAST_REG_2026 = utc(2027, 1, 10, 18, 0)   # 2026 week 18 (nflverse placeholder 13:00 ET)
-CUTOFFS = {2026: LAST_REG_2026}
+FIRST_REG_2026 = utc(2026, 9, 11, 0, 20)
+CUTOFFS = {2026: Window(FIRST_REG_2026, LAST_REG_2026)}
 
 UPCOMING = [{"id": "g1", "commence_time": "2026-12-06T18:00:00Z"}]   # inside 168 h of WED, THU and SAT
 
@@ -346,15 +348,25 @@ def test_spread_readers_import_the_same_lister():
 WED_W18 = utc(2027, 1, 6, 17, 31)    # Wednesday before the 2026 week 18
 WED_WC = utc(2027, 1, 13, 17, 31)    # Wednesday before wild-card weekend
 WILD_CARD = utc(2027, 1, 16, 21, 30)
+WED_W18_2027 = utc(2028, 1, 5, 17, 31)
+W18_2027 = utc(2028, 1, 9, 18, 0)
+WITH_2027 = {**CUTOFFS, 2027: Window(utc(2027, 9, 10, 0, 20), W18_2027)}
+
+
+def no_schedule():
+    raise ScheduleUnavailable("data/nflverse_cache/games.csv not found")
+
+
+def test_test_dates_are_gate_days():
+    for d in (WED_W18, WED_WC, WED_W18_2027, utc(2027, 8, 25, 17, 31)):
+        assert ms.gate_reason(d) is None, d
 
 
 def test_has_upcoming_event_counts_regular_season_games_only():
     assert ms.has_upcoming_event([_ev(LAST_REG_2026)], WED_W18, cutoffs=CUTOFFS)
     assert not ms.has_upcoming_event([_ev(WILD_CARD)], WED_WC, cutoffs=CUTOFFS)
-    k27 = utc(2027, 9, 12, 17, 0)
-    assert not ms.has_upcoming_event([_ev(k27)], k27 - timedelta(days=4), cutoffs=CUTOFFS)
-    with_2027 = {**CUTOFFS, 2027: utc(2028, 1, 9, 21, 25)}
-    assert ms.has_upcoming_event([_ev(k27)], k27 - timedelta(days=4), cutoffs=with_2027)
+    assert not ms.has_upcoming_event([_ev(W18_2027)], WED_W18_2027, cutoffs=CUTOFFS)
+    assert ms.has_upcoming_event([_ev(W18_2027)], WED_W18_2027, cutoffs=WITH_2027)
 
 
 def test_playoff_week_makes_no_paid_call(tmp_path, monkeypatch, capsys):
@@ -369,29 +381,39 @@ def test_week_18_snapshot_is_still_taken(tmp_path, monkeypatch):
     assert code == 0 and len(get.odds_calls) == 1 and len(written(tmp_path)) == 1
 
 
-def test_missing_schedule_fails_closed(tmp_path, monkeypatch, capsys):
-    from src.regular_season import ScheduleUnavailable
+def test_week_18_inside_the_grace_window_counts(tmp_path, monkeypatch):
+    snf = LAST_REG_2026 + timedelta(hours=7, minutes=20)
+    code, get = run(WED_W18, tmp_path, monkeypatch, get=FakeGet(events=[_ev(snf)]))
+    assert code == 0 and len(get.odds_calls) == 1
 
-    def no_schedule():
-        raise ScheduleUnavailable("data/nflverse_cache/games.csv not found")
 
+def test_december_snapshot_is_taken_without_a_schedule(tmp_path, monkeypatch):
     code, get = run(WED, tmp_path, monkeypatch, cutoffs_fn=no_schedule)
+    assert code == 0 and len(get.odds_calls) == 1 and len(written(tmp_path)) == 1
+
+
+def test_january_playoff_fails_closed_without_a_schedule(tmp_path, monkeypatch, capsys):
+    code, get = run(WED_WC, tmp_path, monkeypatch, get=FakeGet(events=[_ev(WILD_CARD)]),
+                    cutoffs_fn=no_schedule)
     assert code == 1 and get.odds_calls == [] and written(tmp_path) == []
     out = capsys.readouterr().out
     assert "games.csv not found" in out and "0 credits spent" in out
 
 
 def test_season_missing_from_schedule_fails_closed(tmp_path, monkeypatch, capsys):
-    k27 = utc(2027, 9, 12, 17, 0)
-    now = utc(2027, 9, 8, 17, 31)   # Wednesday
-    code, get = run(now, tmp_path, monkeypatch, get=FakeGet(events=[_ev(k27)]))
+    code, get = run(WED_W18_2027, tmp_path, monkeypatch, get=FakeGet(events=[_ev(W18_2027)]))
     assert code == 1 and get.odds_calls == []
     assert "no regular-season schedule for 2027" in capsys.readouterr().out
 
 
 def test_2027_snapshot_allowed_once_its_schedule_is_present(tmp_path, monkeypatch):
-    k27 = utc(2027, 9, 12, 17, 0)
-    now = utc(2027, 9, 8, 17, 31)
-    with_2027 = {**CUTOFFS, 2027: utc(2028, 1, 9, 21, 25)}
-    code, get = run(now, tmp_path, monkeypatch, get=FakeGet(events=[_ev(k27)]), cutoffs_fn=lambda: with_2027)
+    code, get = run(WED_W18_2027, tmp_path, monkeypatch, get=FakeGet(events=[_ev(W18_2027)]),
+                    cutoffs_fn=lambda: WITH_2027)
     assert code == 0 and len(get.odds_calls) == 1
+
+
+def test_august_preseason_makes_no_paid_call(tmp_path, monkeypatch, capsys):
+    code, get = run(utc(2027, 8, 25, 17, 31), tmp_path, monkeypatch,
+                    get=FakeGet(events=[_ev(utc(2027, 8, 27, 0, 0))]), cutoffs_fn=lambda: WITH_2027)
+    assert code == 0 and get.odds_calls == []
+    assert "before the 2027 regular season" in capsys.readouterr().out
