@@ -37,8 +37,8 @@ from src.props import PROPS_CACHE_DIR
 from src.props.load_prop_archive import DEFAULT_REF, list_prop_snapshots, parse_prop_name
 
 MARKET = "player_receptions"
-_DEFAULT_BOOKS = ("pinnacle,draftkings,fanduel,betmgm,williamhill_us,"
-                  "betrivers,betonlineag,bovada,betus,mybookieag")
+_DEFAULT_BOOKS = ("pinnacle,draftkings,fanduel,betmgm,espnbet,"
+                  "betrivers,betonlineag,bovada,fanatics,hardrockbet")
 BOOKMAKERS = [b.strip() for b in os.getenv("PROPS_BOOKMAKERS", _DEFAULT_BOOKS).split(",") if b.strip()]
 CLOSE_LEAD_MIN = int(os.getenv("PROPS_CLOSE_LEAD_MIN", "25"))
 CLOSE_WINDOW_MIN = (40, 5)   # close is due from kickoff-40 to kickoff-5

@@ -265,6 +265,20 @@ def test_default_bookmaker_list_is_ten_or_fewer():
     assert "lowvig" not in cp.BOOKMAKERS
 
 
+def test_default_books_after_2026_11_26_swap():
+    # Owner decision (a), 2026-11-24: williamhill_us, betus and mybookieag posted no
+    # player_receptions in the probe or the GB @ LA open/close, so they were replaced.
+    from src.props import topdown_props as tp
+    books = cp._DEFAULT_BOOKS.split(",")
+    assert books == ["pinnacle", "draftkings", "fanduel", "betmgm", "espnbet",
+                     "betrivers", "betonlineag", "bovada", "fanatics", "hardrockbet"]
+    assert not {"williamhill_us", "betus", "mybookieag"} & set(books)
+    # Every book is P4's anchor, alt anchor or a frozen class, so none is ignored.
+    known = {tp.ANCHOR_BOOK, tp.ALT_ANCHOR_BOOK} | tp.US_TARGETS | tp.OFFSHORE
+    assert set(books) <= known
+    assert {"espnbet", "fanatics", "hardrockbet"} <= tp.US_TARGETS
+
+
 # 7. Snapshot file --------------------------------------------------------------------
 
 def test_snapshot_file_name_and_schema_with_empty_response(tmp_path, monkeypatch):
