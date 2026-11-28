@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pandas as pd
 import pytz
-import nfl_data_py as nfl
+from src.nflverse_schedule import import_schedules
 
 from src.config import SEASON
 from src.sheet_utils import get_sheet_as_df
@@ -50,7 +50,7 @@ def main():
         print("Missing status column.")
 
     print("\n=== Loading nflverse schedule for season " + str(SEASON) + " ===")
-    sched = nfl.import_schedules([SEASON])
+    sched = import_schedules([SEASON])
 
     print("Total nflverse schedule rows: " + str(len(sched)))
     print("nflverse columns: " + str(list(sched.columns)))
