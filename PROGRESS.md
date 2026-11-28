@@ -2,12 +2,12 @@
 
 ## Current state
 
-- **2026-11-28 (urgent, PR `claude/schedule-source-404`):** nfl_data_py's schedule mirror (habitatring.com) returns 404, so Nightly Results failed at 05:17 UTC and DEN @ PIT (CLOSE_CAPTURED) is unsettled. New `src/nflverse_schedule.py` reads the nflverse GitHub copy. Merge before Tue 12-01's opening run, which otherwise gets an empty schedule (CI has no `games.csv` cache). PR #37 (prop book swap) is still open, past its Fri 11-27 21:00 UTC fallback deadline.
-- **Branch:** `claude/regular-season-cutoff` (PR open, waits for owner merge). PRs #14–#35 are merged on `main`.
+- **Branch:** `claude/amazing-johnson-kfhn3v` (prop book swap, PR #37; owner merges before Thu 12-03 ~21:15 UTC, the week-14 TNF open). PRs #14–#36 and #38 are merged on `main`.
+- **2026-11-28:** schedule source fixed (PR #38, merged): nfl_data_py's habitatring.com mirror returns 404, so Nightly Results failed at 05:17 UTC; `src/nflverse_schedule.py` now reads the nflverse GitHub copy. DEN @ PIT settles at the next Nightly Results run.
 - **Last task:** regular-season filter: props capture and mid-week snapshots always count Sep–Dec kickoffs (no schedule needed) and count Jan–Aug kickoffs only inside the season's REG window from nflverse `games.csv` (±24 h grace), failing closed for Jan–Aug without a schedule (`src/regular_season.py`). Before that, Nov 25 audit hardening: prop grading never sums a playoff rematch into a regular-season game; the mid-week snapshot spends nothing when no game kicks off within 168 h; `props_capture.yml` uses a shallow checkout. Before that, P5a Stage A: **FAIL**, Step 5 closed.
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
-- **Mid-week snapshots:** merged (PR #33). Worker redeploy (`cd external_trigger && npm run deploy`) recommended before Wed 2026-11-25 17:30 UTC; until then only the GitHub backup cron runs the job.
-- **Owner decision (2026-11-25):** the 2026 P2/P4 gates are regular-season only; final reports run on the `odds-data` tag `eval-2026-final` set at week-18 settle (`notes/implementation-plan/README.md` decision 5). Props capture and mid-week snapshots now stop after the last regular-season kickoff (2026: 2027-01-10 18:00 UTC placeholder, plus 24 h grace) and skip August preseason, once this PR merges; a failed schedule download never blocks Sep–Dec capture. Prop book swap (`betus`→`fanatics`, `mybookieag`→`hardrockbet`, `williamhill_us`→`espnbet`) after the GB @ LA captures, before Thu 11-26 13:30 UTC.
+- **Mid-week snapshots:** live. Owner redeployed the Worker on 11-24 (version `916d228c`, 4 crons incl. `30 13,17,21 * * MON,WED,THU,FRI,SAT`). First snapshot `odds_20261125T173058Z` (2 credits); the 21:30 wake and a late backup-cron run (01:11 UTC Thu) called nothing.
+- **Owner decision (2026-11-25):** the 2026 P2/P4 gates are regular-season only; final reports run on the `odds-data` tag `eval-2026-final` set at week-18 settle (`notes/implementation-plan/README.md` decision 5). Props capture and mid-week snapshots now stop after the last regular-season kickoff (2026: 2027-01-10 18:00 UTC placeholder, plus 24 h grace) and skip August preseason, once this PR merges; a failed schedule download never blocks Sep–Dec capture. Prop book swap (`betus`→`fanatics`, `mybookieag`→`hardrockbet`, `williamhill_us`→`espnbet`) is in the open PR on `claude/amazing-johnson-kfhn3v`; it must merge before Thu 11-26 13:30 UTC (the first Thanksgiving open).
 - **Next task:** Step 5 is closed (P5a FAIL), so there is no P5b. Next is the P1 live check after the first Friday and Sunday (P1 spec "Live check"), and the owner's next roadmap item.
 - **Owner decisions (2026-11-24):** (a) yes: after the Wed 11-25 GB @ LA captures are checked, replace `williamhill_us` with `espnbet` unless it posted props, and `betus`/`mybookieag` with `fanatics`/`hardrockbet`, before Fri 11-27 21:00 UTC; (b) yes: add ~3 mid-week game-odds snapshots a week for P2's gate (~6 credits a week); (c) no: no historical prop odds are bought, so P5's market test (Stage B) uses only the 2026 archive.
 - **Weekly re-runs:** `src.topdown_replay` (pre-registered Phase 3 test; 34 of 100 flagged offers, 17 of 40 played games on 11-24), `src.topdown_v2` (frozen P2 gate on the evaluation sample from 2026-11-25; 0 of 80 offers, 0 of 35 games on 11-24) and `src.props.topdown_props` after `git fetch origin odds-data` (frozen P4 gate; 0 of 150 offers, 0 of 30 games on 11-24). Descriptive only, never stop early for a pass. Phase 4 at the off-season. No retrain queued. Owner decided (2026-11-21): v4 keeps logging as a shadow until the season ends, then retires unless the R3 raw-lean test clearly favours it; off-season v3 retrain with `split_neutral_teams`.
@@ -27,11 +27,11 @@
 | Audit Phase 2 feature study | `notes/phase2-feature-study.md` | done (PR #20) |
 | Audit P0-7 v4 QB shock + v4 study | `notes/p0-7-v4-qb-study.md` | done (PR #21) |
 | Audit Phase 3 market consensus | `notes/phase3-market-consensus.md` | offline replay done (PR #22), live tab held; weekly re-run |
-| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); Worker redeployed, probe done (run 45488926007); live check after the first Friday and Sunday |
+| P1 prop archive capture | `notes/implementation-plan/P1-props-capture.md` | built and merged 11-24 (PR #26); Worker redeployed, probe done (run 45488926007); first open/close 11-25 (GB @ LA); book swap 11-26; live check after the first Friday and Sunday |
 | P2 top-down v2 (spreads + totals) | `notes/implementation-plan/P2-topdown-v2.md` | built 11-24 (`notes/p2-topdown-v2.md`); weekly re-run, gate pending |
 | P3 totals kill test | `notes/implementation-plan/P3-totals-kill-test.md` | done 11-24: KILL (`notes/p3-totals-kill-test.md`); bottom-up totals closed |
 | P4 prop scanner | `notes/implementation-plan/P4-prop-scanner.md` | built 11-24 (`notes/p4-prop-scanner.md`); weekly re-run, gate pending |
-| Mid-week game-odds snapshots | owner answer to the P2 owner question (11-24); `notes/midweek-snapshots.md` | built and merged 11-24 (PR #33); Worker redeploy before Wed 12-02 13:30 UTC |
+| Mid-week game-odds snapshots | owner answer to the P2 owner question (11-24); `notes/midweek-snapshots.md` | built and merged 11-24 (PR #33); Worker redeployed 11-24; first snapshot 11-25 17:30 UTC |
 | P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | P5a done 11-24: Stage A **FAIL** on calibration (`notes/p5a-receptions-stage-a.md`); Step 5 closed, no P5b |
 
 ## Log
@@ -47,6 +47,16 @@
 - P4 descriptive run: 0 ungraded players across 613 graded rows (no name mismatches). Gate pending at 7 offers on 4 games; `drift_ok` met.
 - Still to check: the Sunday/Monday closes (P1 "after the first Sunday").
 - Tests: true iff `pytest tests/ -q` reports 1871 passed (8 new).
+
+### 2026-11-26: first prop open/close, first mid-week snapshot, prop book swap
+
+- GB @ LA (kickoff 11-26 01:00 UTC): `props_open_…_20261125T210000Z` (captured by the 17:30 run after sleeping to its 21:00 target, k − 240 min) and `props_close_…_20261126T003500Z` (21:30 run, k − 25 min). 1 credit each; remaining 390 after the open, 385 after the close.
+- Players per book, open / close: Pinnacle 15/15, DraftKings 15/15, FanDuel 15/15, Bovada 15/15, BetMGM 13/13, BetRivers 12/11 (Over only), BetOnline 15 at the open and **absent at the close**. `williamhill_us`, `betus`, `mybookieag`: none in the probe, the open or the close.
+- Owner decision (a) applied: `_DEFAULT_BOOKS` in `src/props/capture_props.py` swaps `williamhill_us`→`espnbet`, `betus`→`fanatics`, `mybookieag`→`hardrockbet`. Still 10 books (one region of billing) with Pinnacle; credit cost unchanged. All three new books are in P4's frozen `US_TARGETS`, so no P4 rule changes; P4's offshore class now has only Bovada in the capture list. A new test pins the list and checks every book is in a P4 class.
+- `PROPS_BOOKMAKERS` overrides still win. No workflow or Worker change, so no redeploy.
+- Mid-week snapshot (first real run): Wed 11-25 17:30 wake wrote `odds_20261125T173058Z` (30 events, 2 credits, 393 → 391). The 21:30 wake found it and skipped; the backup cron's late run at 01:11 UTC Thu was before the window and called nothing.
+- Worker: owner redeployed on 11-24 after #31–#34 (version `916d228c`).
+- Tests: true iff `pytest tests/ -q` reports 1863 passed, 1 skipped.
 
 ### 2026-11-25: regular-season cutoff for props capture and mid-week snapshots
 
