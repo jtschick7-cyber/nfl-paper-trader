@@ -26,8 +26,8 @@ def sync_schedule():
         from src.model_utils import _load_sched
         sched = _load_sched([SEASON])
     except Exception:
-        import nfl_data_py as nfl
-        sched = nfl.import_schedules([SEASON])
+        from src.nflverse_schedule import import_schedules
+        sched = import_schedules([SEASON])
     print(f"Schedule provider returned {len(sched)} games for season {SEASON}.")
 
     sheet_df = get_sheet_as_df()

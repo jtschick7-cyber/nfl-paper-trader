@@ -2,7 +2,8 @@
 
 ## Current state
 
-- **Branch:** `claude/amazing-johnson-kfhn3v` (prop book swap; PR open, owner merges before Thu 2026-11-26 13:30 UTC). PRs #14–#36 are merged on `main`.
+- **Branch:** `claude/amazing-johnson-kfhn3v` (prop book swap, PR #37; owner merges before Thu 12-03 ~21:15 UTC, the week-14 TNF open). PRs #14–#36 and #38 are merged on `main`.
+- **2026-11-28:** schedule source fixed (PR #38, merged): nfl_data_py's habitatring.com mirror returns 404, so Nightly Results failed at 05:17 UTC; `src/nflverse_schedule.py` now reads the nflverse GitHub copy. DEN @ PIT settles at the next Nightly Results run.
 - **Last task:** regular-season filter: props capture and mid-week snapshots always count Sep–Dec kickoffs (no schedule needed) and count Jan–Aug kickoffs only inside the season's REG window from nflverse `games.csv` (±24 h grace), failing closed for Jan–Aug without a schedule (`src/regular_season.py`). Before that, Nov 25 audit hardening: prop grading never sums a playoff rematch into a regular-season game; the mid-week snapshot spends nothing when no game kicks off within 168 h; `props_capture.yml` uses a shallow checkout. Before that, P5a Stage A: **FAIL**, Step 5 closed.
 - **P1 is live.** The Worker was redeployed twice; its crons now include `30 13,17,21 * * MON,WED,THU,FRI,SAT` (closing loop + props capture). Probe run 45488926007 cost 1 credit and found `player_receptions` at Pinnacle, DraftKings, FanDuel, BetOnline and Bovada (15 players), BetMGM (12) and BetRivers (12, Over only); none at `williamhill_us`, `betus`, `mybookieag`.
 - **Mid-week snapshots:** live. Owner redeployed the Worker on 11-24 (version `916d228c`, 4 crons incl. `30 13,17,21 * * MON,WED,THU,FRI,SAT`). First snapshot `odds_20261125T173058Z` (2 credits); the 21:30 wake and a late backup-cron run (01:11 UTC Thu) called nothing.
@@ -34,6 +35,18 @@
 | P5 receptions model | `notes/implementation-plan/P5-receptions-model.md` | P5a done 11-24: Stage A **FAIL** on calibration (`notes/p5a-receptions-stage-a.md`); Step 5 closed, no P5b |
 
 ## Log
+
+### 2026-11-28: schedule source fix; Sat P1 live check
+
+- Nightly Results run 46111441456 failed: `nfl.import_schedules` reads `http://www.habitatring.com/games.csv`, now HTTP 404. The same 46-column file at `raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv` is current: 168 finals, DEN @ PIT 5–27 included.
+- New `src/nflverse_schedule.import_schedules` has the same contract as the old call and tries GitHub first, with the old mirror as fallback. It is used by `update_results`, `compare_models.load_final_scores` (which had silently returned no scores on failure), `audit_state`, `fetch_schedule` and `model_utils._load_sched` (which returned an empty schedule in CI without a cache).
+- No workflow, frozen file, model, Sheet or Odds API touched.
+- P1 live check, holiday and Friday part: GB @ LA, the 3 Thanksgiving games and DEN @ PIT each have 1 open (captured at target) and 1 close (25–30 min before kickoff). All 11 Sun/Mon games have Friday 21:00 opens. Every file cost 1 credit, the Friday run cost 11, and 338 credits remain. No empty `bookmakers` file.
+- In the same check, `williamhill_us`, `betus` and `mybookieag` posted nothing in all 16 files (PR #37 unmerged). NE @ LAC's open has 5 books and no Pinnacle.
+- Closing loop: the holiday closes landed at T-10.4 to T-12.2 min (pass band T-10 to T-17). The mid-week job skipped Friday correctly; the 11-27 17:30 snapshot is the closing loop's.
+- P4 descriptive run: 0 ungraded players across 613 graded rows (no name mismatches). Gate pending at 7 offers on 4 games; `drift_ok` met.
+- Still to check: the Sunday/Monday closes (P1 "after the first Sunday").
+- Tests: true iff `pytest tests/ -q` reports 1871 passed (8 new).
 
 ### 2026-11-26: first prop open/close, first mid-week snapshot, prop book swap
 

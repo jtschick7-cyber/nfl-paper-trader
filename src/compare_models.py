@@ -23,13 +23,9 @@ import numpy as np
 import pandas as pd
 import pytz
 
-try:
-    import nfl_data_py as nfl
-except ImportError:
-    nfl = None
-
 from src.decision_window import current_decision_week
 from src.config import FLAT_BET_SIZE, LOCAL_TZ, MASTER_SHEET_NAME, MIN_EDGE_THRESHOLD, SEASON
+from src.nflverse_schedule import import_schedules
 from src.key_numbers import calculate_spread_probabilities, market_implied_mean
 from src.odds_utils import american_to_implied_prob, remove_vig
 from src.staking import cap_slate_stakes, compute_push_aware_stake
@@ -92,10 +88,8 @@ def fetch_tab_df(tab_name):
 
 def load_final_scores(season=SEASON):
     """Loads all finalized game scores for the season via nflverse."""
-    if nfl is None:
-        return {}
     try:
-        sched = nfl.import_schedules([season])
+        sched = import_schedules([season])
         sched = sched[sched["home_score"].notna() & sched["away_score"].notna()].copy()
         scores = {}
         for _, g in sched.iterrows():
