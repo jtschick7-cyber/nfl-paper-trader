@@ -230,8 +230,8 @@ def _load_sched(seasons):
 
     if seasons_to_fetch:
         try:
-            import nfl_data_py as nfl
-            new_raw = nfl.import_schedules(seasons_to_fetch)
+            from src.nflverse_schedule import import_schedules
+            new_raw = import_schedules(seasons_to_fetch)
             if new_raw is not None and not new_raw.empty:
                 if scheds is not None and not scheds.empty:
                     gid_col = "game_id" if "game_id" in new_raw.columns and "game_id" in scheds.columns else None

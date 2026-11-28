@@ -1,5 +1,5 @@
 import pandas as pd
-import nfl_data_py as nfl
+from src.nflverse_schedule import import_schedules
 
 from src.config import FLAT_BET_SIZE, SEASON
 from src.sheet_utils import batch_update_cells, get_master_sheet, get_sheet_as_df
@@ -34,7 +34,7 @@ def update_results():
         print("Sheet is empty.")
         return
 
-    sched = nfl.import_schedules([SEASON])
+    sched = import_schedules([SEASON])
     sched = sched[sched["home_score"].notna() & sched["away_score"].notna()].copy()
 
     scores = {}
